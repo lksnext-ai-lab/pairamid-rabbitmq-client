@@ -31,7 +31,7 @@ class Publisher:
         self.vhost = vhost or os.environ.get("RABBITMQ_DEFAULT_VHOST", "/")
         self.client_id = client_id or os.environ.get("RABBITMQ_CLIENT_ID")
         self.client_secret = client_secret or os.environ.get("RABBITMQ_CLIENT_SECRET")
-        self.token_url = token_url or os.environ.get("KEYCLOAK_TOKEN_URL")
+        self.token_url = token_url or os.environ.get("OAUTH2_TOKEN_URL")
         self._token_provider = self._build_token_provider()
 
         self._connection: pika.BlockingConnection | None = None
@@ -53,7 +53,7 @@ class Publisher:
         """Build the required Keycloak client-credentials provider."""
         if not all((self.client_id, self.client_secret, self.token_url)):
             raise ValueError(
-                "RABBITMQ_CLIENT_ID, RABBITMQ_CLIENT_SECRET and KEYCLOAK_TOKEN_URL "
+                "RABBITMQ_CLIENT_ID, RABBITMQ_CLIENT_SECRET and OAUTH2_TOKEN_URL "
                 "must be configured together"
             )
         return ClientCredentialsTokenProvider(

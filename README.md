@@ -16,14 +16,14 @@ The package requires Python 3.10 or newer and a reachable RabbitMQ broker.
 The clients read connection settings from environment variables when values are
 not passed explicitly:
 
-| Variable | Default | Purpose |
+| Variable | Example | Purpose |
 | --- | --- | --- |
 | `RABBITMQ_HOST` | `rabbitmq` | Broker hostname |
 | `RABBITMQ_PORT` | `5672` | Broker port |
 | `RABBITMQ_DEFAULT_VHOST` | `/` | Virtual host |
-| `RABBITMQ_CLIENT_ID` | none | OAuth2 client ID |
-| `RABBITMQ_CLIENT_SECRET` | none | OAuth2 client secret |
-| `KEYCLOAK_TOKEN_URL` | none | OAuth2 token endpoint |
+| `RABBITMQ_CLIENT_ID` | `platform-client` | OAuth2 client ID |
+| `RABBITMQ_CLIENT_SECRET` | `secret` | OAuth2 client secret |
+| `OAUTH2_TOKEN_URL` | `https://keycloak.example.com/realms/pairamid/protocol/openid-connect/token` | OAuth2 token endpoint |
 | `SIMULATION_INPUT_DIR` | `./data` | Directory where input JSON files are stored |
 | `CONSUMER_POLL_INTERVAL_SECONDS` | `30` | Delay between input queue polls |
 
