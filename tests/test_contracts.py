@@ -45,7 +45,7 @@ class ContractTests(unittest.TestCase):
             ("requested_at", "2026-02-30T00:00:00Z"),
             ("requested_at", "2026-01-01"),
             ("simulation_key", "UPPER"),
-            ("schema_version", "2.0"),
+            ("schema_version", "1.0"),
             ("unexpected", True),
         ):
             obj = example("simulation-execution-message")
@@ -97,6 +97,52 @@ class ContractTests(unittest.TestCase):
         obj["result"]["payload"]["simulation_key"] = "another"
         with self.assertRaisesRegex(ContractValidationError, "Must match the event context"):
             validate_result_event(obj)
+        obj = example("simulation-execution-result-succeeded")
+        obj["result"]["payload"]["simulation_execution_id"] += 1
+        with self.assertRaisesRegex(ContractValidationError, "Must match the event context"):
+            validate_result_event(obj)
+
+    def test_database_execution_ids_and_workflow_rejection_in_all_contracts(self):
+        for name, validator in (
+            ("simulation-execution-message", validate_execution_message),
+            ("simulation-execution-input-downloaded-event", validate_input_downloaded_event),
+            ("simulation-execution-result-succeeded", validate_result_event),
+            ("simulation-execution-result-failed", validate_result_event),
+            ("simulation-execution-result-payload", validate_result_payload),
+            ("simulation-execution-error-payload", validate_error_payload),
+        ):
+            original = example(name)
+            self.assertIs(type(original["simulation_execution_id"]), int)
+            self.assertEqual(original["schema_version"], "2.0")
+            self.assertNotIn("workflow_instance_name", original)
+            for value in (True, False, 0, -1, 1.0, 1.5, "1", None,
+                          "f0e18f37-5844-4c57-a235-31d8f7427d31", 9007199254740992):
+                obj = copy.deepcopy(original)
+                obj["simulation_execution_id"] = value
+                with self.subTest(name=name, id=value), self.assertRaises(ContractValidationError):
+                    validator(obj)
+            obj = copy.deepcopy(original)
+            obj["workflow_instance_name"] = "not-supported"
+            with self.subTest(name=name), self.assertRaises(ContractValidationError):
+                validator(obj)
+            obj = copy.deepcopy(original)
+            obj["schema_version"] = "1.0"
+            with self.subTest(name=name), self.assertRaises(ContractValidationError):
+                validator(obj)
+
+    def test_nested_execution_id_is_strict_and_safe_integer_boundary_is_valid(self):
+        obj = example("simulation-execution-result-succeeded")
+        obj["result"]["payload"]["simulation_execution_id"] = float(obj["simulation_execution_id"])
+        with self.assertRaises(ContractValidationError):
+            validate_result_event(obj)
+        execution = example("simulation-execution-message")
+        execution["simulation_execution_id"] = 9007199254740991
+        payload = build_result_payload(execution, {"workflow_instance_name": "opaque partner output"})
+        event = build_succeeded_event(payload)
+        validate_result_event(event)
+        self.assertEqual(event["simulation_execution_id"], 9007199254740991)
+        self.assertEqual(event["result"]["payload"]["output"],
+                         {"workflow_instance_name": "opaque partner output"})
 
     def test_builders_validate_and_deep_copy_without_transforming_output(self):
         execution = example("simulation-execution-message")

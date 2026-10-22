@@ -3,6 +3,7 @@
 import json
 import os
 import unittest
+from secrets import randbelow
 from uuid import uuid4
 
 from test_contracts import example
@@ -30,7 +31,7 @@ class RabbitMQIntegrationTests(unittest.TestCase):
         )
         execution = example("simulation-execution-message")
         execution["message_id"] = str(uuid4())
-        execution["simulation_execution_id"] = str(uuid4())
+        execution["simulation_execution_id"] = randbelow(9007199254740991) + 1
         execution["simulation_key"] = "lri"
         with (
             PlatformClient(
@@ -60,7 +61,6 @@ class RabbitMQIntegrationTests(unittest.TestCase):
                 "simulation_execution_id",
                 "run_id",
                 "attempt_id",
-                "workflow_instance_name",
                 "simulation_key",
             ):
                 failed_payload[key] = execution[key]
@@ -95,7 +95,7 @@ class RabbitMQIntegrationTests(unittest.TestCase):
             self.fail("Unexpected message requeued; stop tests and inspect queue without purging")
         try:
             self.assertEqual(json.loads(body), expected)
-            self.assertEqual(props.correlation_id, expected["simulation_execution_id"])
+            self.assertEqual(props.correlation_id, str(expected["simulation_execution_id"]))
             self.assertEqual(props.user_id, username)
             self.assertEqual(props.delivery_mode, 2)
             self.assertEqual(props.content_type, "application/json")

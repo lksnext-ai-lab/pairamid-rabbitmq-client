@@ -1,4 +1,4 @@
-"""Offline validation and construction of the version 1.0 messaging contracts."""
+"""Offline validation and construction of the version 2.0 messaging contracts."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from referencing import Registry, Resource
 
 from ..exceptions import ContractValidationError, ValidationIssue
 
+SCHEMA_VERSION = "2.0"
 SCHEMA_NAMES = (
     "simulation-execution-message",
     "simulation-execution-input-downloaded-event",
@@ -28,7 +29,6 @@ CONTEXT_FIELDS = (
     "simulation_execution_id",
     "run_id",
     "attempt_id",
-    "workflow_instance_name",
     "simulation_key",
 )
 
@@ -86,12 +86,20 @@ def _validate(name: str, obj: Any) -> None:
                 "/" + str(part).replace("~", "~0").replace("/", "~1")
                 for part in error.absolute_path
             ),
-            "Unsupported schema_version; expected '1.0'"
+            f"Unsupported schema_version; expected '{SCHEMA_VERSION}'"
             if list(error.absolute_path)[-1:] == ["schema_version"]
             else error.message,
         )
         for error in errors
     ]
+    if (
+        isinstance(obj, dict)
+        and "simulation_execution_id" in obj
+        and type(obj["simulation_execution_id"]) is not int
+    ):
+        issues.append(
+            ValidationIssue("$/simulation_execution_id", "Must be a positive integer database ID")
+        )
     if issues:
         raise ContractValidationError(issues)
 
@@ -116,6 +124,7 @@ def validate_result_event(obj: Any) -> None:
     _validate("simulation-execution-result-event", obj)
     if obj["event_type"] == "simulation_execution.succeeded":
         payload = obj["result"]["payload"]
+        validate_result_payload(payload)
         errors = [
             ValidationIssue(f"$/result/payload/{key}", "Must match the event context")
             for key in CONTEXT_FIELDS
@@ -142,7 +151,7 @@ def build_input_downloaded_event(
     validate_execution_message(execution_message)
     event = {
         **_context(execution_message),
-        "schema_version": "1.0",
+        "schema_version": SCHEMA_VERSION,
         "event_id": str(uuid4()) if event_id is None else event_id,
         "event_type": "simulation_execution.input_downloaded",
         "downloaded_at": _now() if downloaded_at is None else downloaded_at,
@@ -159,7 +168,7 @@ def build_result_payload(
     validate_execution_message(execution_message)
     payload = {
         **_context(execution_message),
-        "schema_version": "1.0",
+        "schema_version": SCHEMA_VERSION,
         "input": copy.deepcopy(execution_message["input"]),
         "output": copy.deepcopy(output),
     }
@@ -176,7 +185,7 @@ def build_succeeded_event(
     validate_result_payload(result_payload)
     event = {
         **_context(result_payload),
-        "schema_version": "1.0",
+        "schema_version": SCHEMA_VERSION,
         "event_id": str(uuid4()) if event_id is None else event_id,
         "event_type": "simulation_execution.succeeded",
         "finished_at": _now() if finished_at is None else finished_at,
@@ -194,7 +203,7 @@ def build_failed_event(
     validate_error_payload(error_payload)
     event = {
         **_context(error_payload),
-        "schema_version": "1.0",
+        "schema_version": SCHEMA_VERSION,
         "event_id": str(uuid4()) if event_id is None else event_id,
         "event_type": "simulation_execution.failed",
         "finished_at": error_payload["finished_at"],

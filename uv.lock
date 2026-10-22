@@ -390,7 +390,7 @@ wheels = [
 
 [[package]]
 name = "pairamid-rabbitmq-client"
-version = "0.0.4"
+version = "0.0.5"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },

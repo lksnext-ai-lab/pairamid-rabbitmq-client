@@ -107,7 +107,7 @@ class PartnerClient(Consumer):
             f"{self.partner_id}.{suffix}",
             json.dumps(dict(body), ensure_ascii=False, allow_nan=False),
             message_id=message_id,
-            correlation_id=body["simulation_execution_id"],
+            correlation_id=str(body["simulation_execution_id"]),
             timestamp=int(time.time()),
         )
 
@@ -175,7 +175,7 @@ class PlatformClient(Publisher):
             f"{partner_id}.{simulation_key}",
             json.dumps(dict(message), ensure_ascii=False, allow_nan=False),
             message_id=message_id,
-            correlation_id=message["simulation_execution_id"],
+            correlation_id=str(message["simulation_execution_id"]),
             timestamp=int(time.time()),
         )
 

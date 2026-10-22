@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.5
+
+- **Breaking:** adopt messaging contracts 2.0 for independent simulations.
+  Remove and reject `workflow_instance_name`; replace UUID execution IDs with
+  positive database-assigned integer IDs (maximum `9007199254740991`).
+- Keep execution IDs numeric in JSON and serialize them as decimal strings in
+  AMQP `correlation_id`, including all partner event types.
+- Update offline schemas, context checks, builders, examples and contract sync
+  sources to the authoritative versioned v2 paths in iTool.
+- Preserve UUID message/event/run/attempt IDs and exact partner output; reject
+  v1 envelopes rather than silently converting them.
+- Add numeric-ID boundaries, strict ID types, nested-context and removed-field
+  regressions. Keep CRLF/LF synchronization checks and legacy API regressions.
+- Document future partner-qualified filenames. Input materialization and
+  result watchers are still not implemented.
+
 ## 0.0.4
 
 - Normalize CRLF/LF when synchronizing and hashing contracts so integrity checks

@@ -6,11 +6,11 @@ through RabbitMQ using Keycloak OAuth2 client credentials.
 ## Installation
 
 ```bash
-pip install "https://github.com/lksnext-ai-lab/pairamid-rabbitmq-client/releases/download/0.0.4/pairamid_rabbitmq_client-0.0.4-py3-none-any.whl"
+pip install "https://github.com/lksnext-ai-lab/pairamid-rabbitmq-client/releases/download/0.0.5/pairamid_rabbitmq_client-0.0.5-py3-none-any.whl"
 ```
 
 The package requires Python 3.10 or newer and a reachable RabbitMQ broker.
-The URL becomes available after the maintainer publishes release **0.0.4**.
+The URL becomes available after the maintainer publishes release **0.0.5**.
 
 ## Configuration
 
@@ -34,7 +34,24 @@ All three OAuth2 variables are required. Keep the client secret in a local
 environment file and never commit it. The broker queues must be provisioned
 before clients connect; the library does not declare queues.
 
-## Version 0.0.4: confirmed execution and event publication
+## Version 0.0.5: standalone simulations with version 2.0 contracts
+
+This release changes the high-level messaging contract incompatibly:
+
+- `schema_version` is now `"2.0"` for all five messaging schemas.
+- `simulation_execution_id` is a positive integer assigned by PostgreSQL when
+  inserting the execution, not a client-generated UUID. The same ID must be
+  reused in events, results and future filenames.
+- IDs are limited to `9007199254740991` so JSON/JavaScript consumers can represent
+  them exactly. Strings, booleans, floating-point IDs and UUID IDs are rejected.
+- `workflow_instance_name` is removed and rejected. Workflow orchestration is
+  deferred; submissions represent independent simulation executions.
+- `run_id`, `attempt_id`, `message_id` and `event_id` remain UUIDs. Transport
+  retries reuse message IDs; they do not create a new simulation attempt.
+
+The library does not allocate execution IDs. iTool must insert the execution,
+obtain its ID and persist the execution message in the same transaction before
+publishing. The examples use illustrative IDs, not a database allocator.
 
 ```python
 import json
@@ -77,10 +94,12 @@ with PartnerClient("irtjv") as client:
 The builders do not download inputs, run simulations, or watch files. Emit
 `input_downloaded` only after input files have actually been stored. Those
 adapter operations are a later release. The partner application will produce
-`results-<simulation_key>-<simulation_execution_id>.json` containing **only its
+`results-<partner_id>-<simulation_key>-<simulation_execution_id>.json` containing **only its
 output**; `build_result_payload(execution, output)` copies the original context
 and preserves that output intact under `output`. `build_succeeded_event(payload)`
-deep-copies the complete payload without transformations.
+deep-copies the complete payload without transformations. The corresponding
+future input name is `input-<partner_id>-<simulation_key>-<simulation_execution_id>.json`.
+Materialization and file watching are not implemented in this release.
 
 `build_failed_event(error_payload)` builds the terminal failure event, preserving
 the error payload's `finished_at`. A terminal error must have `retryable=false`.
@@ -92,7 +111,8 @@ retrying; rebuilding it generates a different ID.
 
 The five authoritative JSON Schemas are versioned copies from iTool, bundled
 inside the wheel. `jsonschema` Draft 2020-12 and an offline `$id` registry validate
-UUIDs, date-times, allowed fields, versions, and event success/failure rules.
+numeric execution IDs, UUIDs for other identifiers, date-times, allowed fields,
+versions, and event success/failure rules.
 No schema is downloaded at runtime.
 
 ```python
@@ -134,7 +154,8 @@ exchange string explicitly selects the default exchange.
 
 Every channel enables confirms once; every publication uses `mandatory=True`,
 `delivery_mode=2` and `content_type="application/json"`. High-level methods set
-the message/event ID, execution correlation ID and Unix timestamp.
+the message/event ID, execution correlation ID and Unix timestamp. The execution
+ID stays an integer in JSON; its AMQP `correlation_id` is its decimal string.
 
 By default, `user_id` is read from the token's `preferred_username`, then
 `client_id`, matching iTool's broker configuration. This local decoding **does
@@ -154,6 +175,15 @@ Errors preserve the original cause:
   so a retry can duplicate a message.
 - Broker channel errors such as `403 ACCESS_REFUSED` or `406` identity mismatch
   stay explicit Pika exceptions, not transient/success-shaped fallbacks.
+
+### Migration from 0.0.4
+
+Update producers and consumers together to version 2.0 envelopes, numeric
+database execution IDs and no workflow field. Version 1.0 messages are rejected,
+not silently converted. The authoritative v1 schemas remain in iTool for
+historical consumers, and release 0.0.4 remains available for that contract.
+Do not mix v1/v2 traffic on a queue with consumers expecting only one version;
+drain or isolate old work before rollout.
 
 ### Migration from 0.0.3
 
@@ -184,7 +214,8 @@ python scripts/sync_contracts.py --source ../pairamid-itool/docs/specs --check
 ```
 
 To update snapshots deliberately, run the last command without `--check`.
-It copies the five schemas and six official messaging examples and records
+It copies the five schemas from `docs/specs/contracts/v2` and six official
+messaging examples from `docs/specs/examples/v2` and records
 their hashes with CRLF line endings normalized to LF. Git checkout conversions
 do not change these hashes; all other content changes remain detectable.
 CI checks snapshot integrity and validates all bundled examples.
@@ -214,10 +245,10 @@ before publishing:
 uvx twine check dist/*
 ```
 
-Publish manually by pushing the exact `0.0.4` tag on a commit already in `main`.
+Publish manually by pushing the exact `0.0.5` tag on a commit already in `main`.
 The release workflow verifies the version, runs tests, and uploads wheel/sdist
 to GitHub Releases. iTool must keep using its existing published pin until
-0.0.4 is actually published and checked; building here does not install it in iTool.
+0.0.5 is actually published and checked; building here does not install it in iTool.
 
 ## License
 

@@ -1,11 +1,10 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "message_id": "f9703267-74b1-4b7d-a4c0-711de2b78328",
-  "simulation_execution_id": "f0e18f37-5844-4c57-a235-31d8f7427d31",
+  "simulation_execution_id": 1,
   "run_id": "b32d7028-0f8c-464a-9d15-a928d292fb0a",
   "attempt_id": "9404fdcc-63e3-4f44-a4a3-480224c590ef",
-  "workflow_instance_name": "fatigue-study-2026",
-  "simulation_key": "dataset.normalize",
+  "simulation_key": "lri",
   "submitted_by": {
     "subject": "54af8d9f-7a0f-4261-a165-6d8d1a75d4fc",
     "client_id": "itool-frontend"

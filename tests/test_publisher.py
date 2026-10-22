@@ -143,7 +143,7 @@ class PublisherTests(unittest.TestCase):
             self.assertEqual(call["exchange"], "custom")
             self.assertEqual(call["routing_key"], "irtjv." + obj["simulation_key"])
             self.assertEqual(json.loads(call["body"]), obj)
-            self.assertEqual(call["properties"].correlation_id, obj["simulation_execution_id"])
+            self.assertEqual(call["properties"].correlation_id, str(obj["simulation_execution_id"]))
             for partner, simulation, message_id in (
                 ("irtjv.other", obj["simulation_key"], obj["message_id"]),
                 ("irtjv", "other", obj["message_id"]),
@@ -168,6 +168,9 @@ class PublisherTests(unittest.TestCase):
                     (call["exchange"], call["routing_key"]), ("events", "irtjv." + suffix)
                 )
                 self.assertEqual(json.loads(call["body"]), event)
+                self.assertEqual(
+                    call["properties"].correlation_id, str(event["simulation_execution_id"])
+                )
             with self.assertRaises(ValueError):
                 client.publish_event("unknown", {}, "id")
             with self.assertRaises(ValueError):

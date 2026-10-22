@@ -1,4 +1,4 @@
-"""Copy or check official messaging schemas and their example fixtures."""
+"""Copy or check official v2 messaging schemas and their example fixtures."""
 
 import argparse
 import hashlib
@@ -38,8 +38,8 @@ def main() -> None:
         parser.error("--source is required to sync contracts")
     manifest = {}
     for folder, names, suffix, target in (
-        ("contracts", SCHEMAS, ".schema.json", TARGET),
-        ("examples", EXAMPLES, ".json", ROOT / "tests/examples"),
+        ("contracts/v2", SCHEMAS, ".schema.json", TARGET),
+        ("examples/v2", EXAMPLES, ".json", ROOT / "tests/examples"),
     ):
         for name in names:
             destination = target / (name + suffix)

@@ -22,8 +22,8 @@ class ContractSyncTests(unittest.TestCase):
                 shutil.copyfile(ROOT / "scripts/sync_contracts.py", script)
                 source = root / "authoritative"
                 for folder, original in (
-                    ("contracts", ROOT / "src/pairamid_rabbitmq_client/contracts"),
-                    ("examples", ROOT / "tests/examples"),
+                    ("contracts/v2", ROOT / "src/pairamid_rabbitmq_client/contracts"),
+                    ("examples/v2", ROOT / "tests/examples"),
                 ):
                     (source / folder).mkdir(parents=True)
                     for file in original.glob("*.json"):
@@ -83,9 +83,9 @@ class ContractSyncTests(unittest.TestCase):
     def test_changed_authoritative_schema_is_detected(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)
-            shutil.copytree(ROOT / "src/pairamid_rabbitmq_client/contracts", source / "contracts")
-            shutil.copytree(ROOT / "tests/examples", source / "examples")
-            schema = source / "contracts/simulation-execution-message.schema.json"
+            shutil.copytree(ROOT / "src/pairamid_rabbitmq_client/contracts", source / "contracts/v2")
+            shutil.copytree(ROOT / "tests/examples", source / "examples/v2")
+            schema = source / "contracts/v2/simulation-execution-message.schema.json"
             payload = json.loads(schema.read_text())
             payload["required"].append("new_required_field")
             schema.write_text(json.dumps(payload))
