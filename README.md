@@ -185,7 +185,9 @@ python scripts/sync_contracts.py --source ../pairamid-itool/docs/specs --check
 
 To update snapshots deliberately, run the last command without `--check`.
 It copies the five schemas and six official messaging examples and records
-their hashes. CI checks snapshot integrity and validates all bundled examples.
+their hashes with CRLF line endings normalized to LF. Git checkout conversions
+do not change these hashes; all other content changes remain detectable.
+CI checks snapshot integrity and validates all bundled examples.
 Comparing against iTool is an explicit local release check with `--source`;
 CI does not connect GitHub to the private iTool GitLab repository. Automatic
 cross-repository drift monitoring is intentionally deferred. Run the local

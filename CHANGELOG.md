@@ -2,6 +2,8 @@
 
 ## 0.0.4
 
+- Normalize CRLF/LF when synchronizing and hashing contracts so integrity checks
+  remain consistent between Windows worktrees and Linux CI checkouts.
 - Add confirmed exchange/routing-key publication with complete AMQP properties,
   authenticated `user_id`, and distinct unroutable/nack/connection errors.
 - Add validated `publish_execution` and `publish_event` methods and configurable

@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +24,11 @@ EXAMPLES = (
 TARGET = ROOT / "src/pairamid_rabbitmq_client/contracts"
 
 
+def normalized_bytes(path: Path) -> bytes:
+    """Ignore only Git's CRLF/LF conversion, not changes to JSON content."""
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, help="iTool docs/specs directory")
@@ -42,21 +46,23 @@ def main() -> None:
             if args.source is not None:
                 source = args.source / folder / destination.name
                 if args.check:
-                    if not destination.exists() or source.read_bytes() != destination.read_bytes():
+                    if not destination.exists() or normalized_bytes(source) != normalized_bytes(
+                        destination
+                    ):
                         raise SystemExit(f"Contract drift: {folder}/{destination.name}")
                 else:
                     target.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(source, destination)
+                    destination.write_bytes(normalized_bytes(source))
             manifest[f"{folder}/{destination.name}"] = hashlib.sha256(
-                destination.read_bytes()
+                normalized_bytes(destination)
             ).hexdigest()
     manifest_file = TARGET / "manifest.json"
     if args.check:
-        if json.loads(manifest_file.read_text()) != manifest:
+        if json.loads(manifest_file.read_text(encoding="utf-8")) != manifest:
             raise SystemExit("Contract manifest differs; sync from the authoritative iTool specs")
         print("Contracts and examples are synchronized")
     else:
-        manifest_file.write_text(json.dumps(manifest, indent=2) + "\n")
+        manifest_file.write_bytes((json.dumps(manifest, indent=2) + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":
