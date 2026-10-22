@@ -8,21 +8,80 @@ import math
 import os
 import re
 import tempfile
-import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from threading import Event
+from typing import Any
+
+import pika
 
 from .publisher import Publisher
 
 logger = logging.getLogger(__name__)
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+MessageHandler = Callable[["Delivery"], None]
 
 
 class _InvalidMessageError(ValueError):
     pass
 
 
+class Delivery:
+    """A single RabbitMQ delivery that can be acknowledged exactly once."""
+
+    def __init__(
+        self,
+        channel: pika.adapters.blocking_connection.BlockingChannel,
+        delivery_tag: int,
+        body: bytes,
+        properties: pika.BasicProperties | None,
+        headers: Mapping[str, Any] | None,
+        redelivered: bool,
+        routing_key: str,
+    ) -> None:
+        self.body = body
+        self.properties = properties
+        self.headers = dict(headers or {})
+        self.delivery_tag = delivery_tag
+        self.redelivered = redelivered
+        self.routing_key = routing_key
+        self._channel = channel
+        self._responded = False
+
+    @property
+    def responded(self) -> bool:
+        """Whether an ack, reject, or nack has already been attempted."""
+        return self._responded
+
+    def ack(self) -> None:
+        """Acknowledge this delivery."""
+        self._ensure_unanswered()
+        self._responded = True
+        self._channel.basic_ack(delivery_tag=self.delivery_tag)
+
+    def reject(self, requeue: bool = False) -> None:
+        """Reject this delivery, optionally returning it to the queue."""
+        self._ensure_unanswered()
+        if not isinstance(requeue, bool):
+            raise TypeError("requeue must be a bool")
+        self._responded = True
+        self._channel.basic_reject(delivery_tag=self.delivery_tag, requeue=requeue)
+
+    def nack(self, *, requeue: bool) -> None:
+        """Negatively acknowledge this delivery."""
+        self._ensure_unanswered()
+        if not isinstance(requeue, bool):
+            raise TypeError("requeue must be a bool")
+        self._responded = True
+        self._channel.basic_nack(delivery_tag=self.delivery_tag, requeue=requeue)
+
+    def _ensure_unanswered(self) -> None:
+        if self._responded:
+            raise RuntimeError("Delivery has already been acknowledged, rejected, or nacked")
+
+
 class Consumer(Publisher):
-    """Poll a queue and persist valid input messages before acknowledging them."""
+    """Poll RabbitMQ queues and provide explicit delivery acknowledgements."""
 
     def __init__(
         self,
@@ -48,9 +107,13 @@ class Consumer(Publisher):
             user_id=user_id,
             set_user_id=set_user_id,
         )
-        self.simulation_input_dir = Path(
-            simulation_input_dir or os.environ.get("SIMULATION_INPUT_DIR", "./data")
-        )
+        if simulation_input_dir:
+            self.simulation_input_dir = Path(simulation_input_dir)
+        else:
+            simulation_dir = os.environ.get("SIMULATION_DIR", "./simulations").strip()
+            if not simulation_dir:
+                raise ValueError("SIMULATION_DIR must not be empty")
+            self.simulation_input_dir = Path(simulation_dir).expanduser() / "input"
         interval = (
             float(os.environ.get("CONSUMER_POLL_INTERVAL_SECONDS", "30"))
             if poll_interval_seconds is None
@@ -59,47 +122,143 @@ class Consumer(Publisher):
         if not math.isfinite(interval) or interval <= 0:
             raise ValueError("CONSUMER_POLL_INTERVAL_SECONDS must be a positive number")
         self.poll_interval_seconds = interval
+        self._stop_event = Event()
 
-    def poll_once(self, queue: str) -> Path | None:
-        """Fetch at most one message, store it, acknowledge it, and close the connection."""
+    def poll(
+        self,
+        queue: str,
+        handler: MessageHandler,
+        *,
+        max_messages: int | None = None,
+    ) -> int:
+        """Process available messages from one queue and close the connection.
+
+        When ``max_messages`` is omitted, the poll drains the queue until it is
+        empty. A positive limit bounds the number of deliveries in this cycle.
+        """
+        if not isinstance(queue, str) or not queue:
+            raise ValueError("queue must be a non-empty string")
+        if not callable(handler):
+            raise TypeError("handler must be callable")
+        if max_messages is not None and (
+            isinstance(max_messages, bool)
+            or not isinstance(max_messages, int)
+            or max_messages <= 0
+        ):
+            raise ValueError("max_messages must be a positive integer or None")
+
+        processed = 0
         try:
             self.connect()
-            if self._channel is None:
+            channel = self._channel
+            if channel is None:
                 raise RuntimeError("RabbitMQ connection did not provide a channel")
 
-            method_frame, properties, body = self._channel.basic_get(queue=queue, auto_ack=False)
-            if method_frame is None:
-                logger.debug("No input messages available in queue %s", queue)
-                return None
-            if method_frame.delivery_tag is None or not isinstance(body, bytes):
-                raise RuntimeError("RabbitMQ returned an invalid delivery frame")
+            while not self._stop_event.is_set() and (
+                max_messages is None or processed < max_messages
+            ):
+                method_frame, properties, body = channel.basic_get(
+                    queue=queue, auto_ack=False
+                )
+                if method_frame is None:
+                    break
+                if (
+                    method_frame.delivery_tag is None
+                    or not isinstance(body, bytes)
+                    or not isinstance(method_frame.redelivered, bool)
+                    or not isinstance(method_frame.routing_key, str)
+                ):
+                    raise RuntimeError("RabbitMQ returned an invalid delivery frame")
 
-            headers = properties.headers if properties is not None else None
-            simulation_name = headers.get("simulation_name") if headers else None
-            try:
-                target_file = self._store_simulation_input(body, simulation_name)
-            except _InvalidMessageError as exc:
-                self._channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=False)
-                logger.warning("Rejected invalid input message from %s: %s", queue, exc)
-                return None
-            except OSError:
-                self._channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=True)
-                raise
-
-            self._channel.basic_ack(delivery_tag=method_frame.delivery_tag)
-            logger.info("Stored input message from %s as %s", queue, target_file.name)
-            return target_file
+                headers = properties.headers if properties is not None else None
+                delivery = Delivery(
+                    channel=channel,
+                    delivery_tag=method_frame.delivery_tag,
+                    body=body,
+                    properties=properties,
+                    headers=headers,
+                    redelivered=method_frame.redelivered,
+                    routing_key=method_frame.routing_key,
+                )
+                processed += 1
+                try:
+                    handler(delivery)
+                    if not delivery.responded:
+                        logger.error(
+                            "Handler returned without responding to delivery %s from %s",
+                            delivery.delivery_tag,
+                            queue,
+                        )
+                        delivery.nack(requeue=True)
+                        raise RuntimeError("Message handler returned without ack, reject, or nack")
+                except Exception:
+                    logger.exception(
+                        "Message handler failed for delivery %s from %s",
+                        delivery.delivery_tag,
+                        queue,
+                    )
+                    if not delivery.responded:
+                        delivery.nack(requeue=True)
+                    raise
+            return processed
         finally:
             self.close()
 
-    def poll_forever(self, queue: str) -> None:
-        """Poll periodically, logging transient failures and continuing the loop."""
-        while True:
+    def poll_once(self, queue: str) -> Path | None:
+        """Fetch at most one legacy message, persist it, and acknowledge it."""
+        target_file: Path | None = None
+
+        def store(delivery: Delivery) -> None:
+            nonlocal target_file
+            simulation_name = delivery.headers.get("simulation_name")
             try:
-                self.poll_once(queue)
+                target_file = self._store_simulation_input(delivery.body, simulation_name)
+            except _InvalidMessageError as exc:
+                delivery.nack(requeue=False)
+                logger.warning("Rejected invalid input message from %s: %s", queue, exc)
+                return
+            delivery.ack()
+            logger.info("Stored input message from %s as %s", queue, target_file.name)
+
+        self.poll(queue, store, max_messages=1)
+        return target_file
+
+    def poll_forever(
+        self,
+        queue: str,
+        handler: MessageHandler | None = None,
+        *,
+        max_messages: int | None = None,
+    ) -> None:
+        """Poll periodically until stop() is called.
+
+        Omitting ``handler`` retains the legacy file-writing behavior through
+        ``poll_once`` for compatibility with existing callers.
+        """
+        if not isinstance(queue, str) or not queue:
+            raise ValueError("queue must be a non-empty string")
+        if handler is not None and not callable(handler):
+            raise TypeError("handler must be callable")
+        if max_messages is not None and (
+            isinstance(max_messages, bool)
+            or not isinstance(max_messages, int)
+            or max_messages <= 0
+        ):
+            raise ValueError("max_messages must be a positive integer or None")
+
+        while not self._stop_event.is_set():
+            try:
+                if handler is None:
+                    self.poll_once(queue)
+                else:
+                    self.poll(queue, handler, max_messages=max_messages)
             except Exception:
                 logger.exception("RabbitMQ polling failed for queue %s", queue)
-            time.sleep(self.poll_interval_seconds)
+            self._stop_event.wait(self.poll_interval_seconds)
+
+    def stop(self) -> None:
+        """Stop after the current handler finishes and wake the polling loop."""
+        self._stop_event.set()
 
     def _store_simulation_input(self, body: bytes, simulation_name: str | None) -> Path:
         """Store the original JSON body under a unique, validated simulation filename."""

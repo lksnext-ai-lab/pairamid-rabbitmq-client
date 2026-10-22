@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from pairamid_rabbitmq_client import PartnerClient, PlatformClient
@@ -38,7 +39,11 @@ class CompatibilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             client = PartnerClient("irtjv", **SETTINGS, simulation_input_dir=directory)
             channel = MagicMock()
-            method = MagicMock(delivery_tag=7)
+            method = SimpleNamespace(
+                delivery_tag=7,
+                redelivered=False,
+                routing_key="pairamid.input.irtjv",
+            )
             body = b'{"arbitrary":"input"}'
             channel.basic_get.return_value = (
                 method,
@@ -68,7 +73,11 @@ class CompatibilityTests(unittest.TestCase):
             channel.basic_get.return_value = (None, None, None)
             self.assertIsNone(client.poll_once(client.input_queue))
             channel.basic_get.return_value = (
-                MagicMock(delivery_tag=9),
+                SimpleNamespace(
+                    delivery_tag=9,
+                    redelivered=False,
+                    routing_key="pairamid.input.irtjv",
+                ),
                 MagicMock(headers={"simulation_name": "lri"}),
                 b"bad",
             )

@@ -34,7 +34,7 @@ def _validate_simulation(name: object) -> None:
 
 
 class PartnerClient(Consumer):
-    """Partner publisher; input materialization still uses the legacy consumer."""
+    """Partner-side consumer and publisher for executions and simulation events."""
 
     def __init__(
         self,

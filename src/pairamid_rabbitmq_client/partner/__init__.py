@@ -1,0 +1,1 @@
+"""IRTJV partner adapter."""

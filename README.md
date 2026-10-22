@@ -25,7 +25,7 @@ not passed explicitly:
 | `RABBITMQ_CLIENT_ID` | `platform-client` | OAuth2 client ID |
 | `RABBITMQ_CLIENT_SECRET` | `secret` | OAuth2 client secret |
 | `OAUTH2_TOKEN_URL` | `https://keycloak.example.com/realms/pairamid/protocol/openid-connect/token` | OAuth2 token endpoint |
-| `SIMULATION_INPUT_DIR` | `./data` | Directory where input JSON files are stored |
+| `SIMULATION_DIR` | `./simulations` | Partner adapter root for input, results, rejected and internal state directories |
 | `CONSUMER_POLL_INTERVAL_SECONDS` | `30` | Delay between input queue polls |
 | `RABBITMQ_EXECUTION_EXCHANGE` | `simulation_execution_exchange` | Platform execution exchange |
 | `RABBITMQ_EVENTS_EXCHANGE` | `simulation_events_exchange` | Partner event exchange |
@@ -33,6 +33,64 @@ not passed explicitly:
 All three OAuth2 variables are required. Keep the client secret in a local
 environment file and never commit it. The broker queues must be provisioned
 before clients connect; the library does not declare queues.
+
+## Polling consumer
+
+The low-level consumer polls one queue per cycle. Omitting `max_messages`
+drains currently available messages; pass a positive limit to bound a cycle.
+Each handler must explicitly acknowledge, reject, or negatively acknowledge its
+delivery. An unhandled exception or a handler that returns without responding
+is logged and nacked with requeue enabled.
+
+```python
+from pairamid_rabbitmq_client import Consumer, Delivery
+
+def handle(delivery: Delivery) -> None:
+    print(delivery.routing_key, delivery.redelivered, delivery.body)
+    delivery.ack()
+
+consumer = Consumer()
+consumer.poll_forever("pairamid.input.irtjv.lri", handle)
+```
+
+Call `consumer.stop()` from the shutdown path to interrupt the polling wait.
+The current handler is allowed to finish before the loop stops and closes its
+connection. `poll_once(queue)` and `poll_forever(queue)` without a handler keep
+their legacy file-writing behavior for compatibility until the adapter migration
+in a later release; new consumers should pass a handler and decide when to ack.
+
+## IRTJV partner adapter
+
+The adapter is included in this library and runs as a separate process. For this
+delivery it supports the single `irtjv/lri` execution queue and reads connection
+credentials and its local data root from the environment:
+
+```bash
+cp .env.example .env
+# Set RABBITMQ_CLIENT_SECRET and OAUTH2_TOKEN_URL in .env.
+set -a
+. ./.env
+set +a
+python -m pairamid_rabbitmq_client.partner
+```
+
+The process creates `input/`, `results/`, `rejected/input/`,
+`rejected/results/` and `state/` under `SIMULATION_DIR`. `input/` and
+`results/` are the partner-facing folders; `state/` is adapter-managed.
+`SIGINT` and `SIGTERM` stop polling after the current handler finishes.
+
+Valid executions write only their `input` value to
+`input/input-{partner_id}-{simulation_key}-{simulation_execution_id}.json`.
+Temporary files stay under `input/.tmp/`; durable execution context and event
+publication state are stored under `state/`. The adapter publishes the confirmed
+`simulation_execution.input_downloaded` event before acknowledging the execution.
+Identical redeliveries reuse the input and event state; conflicting input for
+the same execution ID is archived under `rejected/input/` and rejected.
+
+Invalid messages are archived with their rejection reason before rejection.
+Disk and broker failures are requeued. The adapter does not launch a simulation;
+the partner runs its tool independently. Real-broker integration tests remain
+required before publishing or deploying this workflow.
 
 ## Version 0.0.5: standalone simulations with version 2.0 contracts
 
