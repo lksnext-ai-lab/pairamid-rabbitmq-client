@@ -26,12 +26,28 @@ class Consumer(Publisher):
 
     def __init__(
         self,
-        *args,
+        host: str | None = None,
+        port: int | None = None,
+        vhost: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        token_url: str | None = None,
+        *,
         simulation_input_dir: str | None = None,
         poll_interval_seconds: float | None = None,
-        **kwargs,
+        user_id: str | None = None,
+        set_user_id: bool = True,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            host,
+            port,
+            vhost,
+            client_id,
+            client_secret,
+            token_url,
+            user_id=user_id,
+            set_user_id=set_user_id,
+        )
         self.simulation_input_dir = Path(
             simulation_input_dir or os.environ.get("SIMULATION_INPUT_DIR", "./data")
         )
@@ -51,27 +67,23 @@ class Consumer(Publisher):
             if self._channel is None:
                 raise RuntimeError("RabbitMQ connection did not provide a channel")
 
-            method_frame, properties, body = self._channel.basic_get(
-                queue=queue, auto_ack=False
-            )
+            method_frame, properties, body = self._channel.basic_get(queue=queue, auto_ack=False)
             if method_frame is None:
                 logger.debug("No input messages available in queue %s", queue)
                 return None
+            if method_frame.delivery_tag is None or not isinstance(body, bytes):
+                raise RuntimeError("RabbitMQ returned an invalid delivery frame")
 
             headers = properties.headers if properties is not None else None
             simulation_name = headers.get("simulation_name") if headers else None
             try:
                 target_file = self._store_simulation_input(body, simulation_name)
             except _InvalidMessageError as exc:
-                self._channel.basic_nack(
-                    delivery_tag=method_frame.delivery_tag, requeue=False
-                )
+                self._channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=False)
                 logger.warning("Rejected invalid input message from %s: %s", queue, exc)
                 return None
             except OSError:
-                self._channel.basic_nack(
-                    delivery_tag=method_frame.delivery_tag, requeue=True
-                )
+                self._channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=True)
                 raise
 
             self._channel.basic_ack(delivery_tag=method_frame.delivery_tag)
@@ -89,9 +101,7 @@ class Consumer(Publisher):
                 logger.exception("RabbitMQ polling failed for queue %s", queue)
             time.sleep(self.poll_interval_seconds)
 
-    def _store_simulation_input(
-        self, body: bytes, simulation_name: str | None
-    ) -> Path:
+    def _store_simulation_input(self, body: bytes, simulation_name: str | None) -> Path:
         """Store the original JSON body under a unique, validated simulation filename."""
         if not isinstance(simulation_name, str) or not _SAFE_NAME_RE.fullmatch(simulation_name):
             raise _InvalidMessageError("missing or invalid simulation_name header")
@@ -115,9 +125,7 @@ class Consumer(Publisher):
             suffix = 1
             while True:
                 suffix_part = "" if suffix == 1 else f"-{suffix}"
-                target_file = self.simulation_input_dir / (
-                    f"{simulation_name}{suffix_part}.json"
-                )
+                target_file = self.simulation_input_dir / (f"{simulation_name}{suffix_part}.json")
                 try:
                     os.link(temporary_name, target_file)
                     return target_file

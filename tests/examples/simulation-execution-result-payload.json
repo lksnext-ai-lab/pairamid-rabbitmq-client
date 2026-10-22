@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "simulation_execution_id": "f0e18f37-5844-4c57-a235-31d8f7427d31",
+  "run_id": "b32d7028-0f8c-464a-9d15-a928d292fb0a",
+  "attempt_id": "9404fdcc-63e3-4f44-a4a3-480224c590ef",
+  "workflow_instance_name": "fatigue-study-2026",
+  "simulation_key": "dataset.normalize",
+  "input": {
+    "model_id": "beam-case-042",
+    "load_case": "nominal",
+    "parameters": {
+      "force_kn": 120
+    }
+  },
+  "output": {
+    "row_count": 1250,
+    "artifact_uri": "s3://itool-results/f0e18f37/normalized.parquet"
+  }
+}

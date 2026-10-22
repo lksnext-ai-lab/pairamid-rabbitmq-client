@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://itool.example/schemas/simulation-execution-input-downloaded-event/1.0",
+  "title": "Evento de materialización local de inputs de una ejecución de simulación",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "event_type", "simulation_execution_id", "run_id", "attempt_id", "workflow_instance_name", "simulation_key", "downloaded_at"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "const": "simulation_execution.input_downloaded" },
+    "simulation_execution_id": { "type": "string", "format": "uuid" },
+    "run_id": { "type": "string", "format": "uuid" },
+    "attempt_id": { "type": "string", "format": "uuid" },
+    "workflow_instance_name": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,99}$" },
+    "simulation_key": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,99}$" },
+    "downloaded_at": { "type": "string", "format": "date-time", "description": "Instante en que el adaptador terminó de escribir correctamente el fichero JSON local de inputs." }
+  }
+}

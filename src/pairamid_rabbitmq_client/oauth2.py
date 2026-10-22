@@ -2,11 +2,34 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+
+def token_username(token: str) -> str:
+    """Read identity metadata; signature/issuer/audience verification belongs to the broker."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise ValueError("Expected a JWT access token")
+        payload = parts[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        if not isinstance(claims, dict):
+            raise ValueError("Expected JWT claims object")
+    except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
+        raise ValueError(
+            "Cannot read OAuth identity; configure user_id explicitly or set_user_id=False"
+        ) from exc
+    for name in ("preferred_username", "client_id"):
+        value = claims.get(name)
+        if isinstance(value, str) and value:
+            return value
+    raise ValueError("Token lacks preferred_username/client_id; configure user_id explicitly")
 
 
 @dataclass

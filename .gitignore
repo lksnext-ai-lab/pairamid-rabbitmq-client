@@ -6,4 +6,5 @@ __pycache__/
 *.pyc
 .venv
 .vscode
-uv.lock
+.mypy_cache/
+.ruff_cache/

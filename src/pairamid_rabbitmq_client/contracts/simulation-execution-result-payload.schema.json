@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://itool.example/schemas/simulation-execution-result-payload/1.0",
+  "title": "Payload de resultado de una ejecución de simulación",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "simulation_execution_id", "run_id", "attempt_id", "workflow_instance_name", "simulation_key", "input", "output"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "simulation_execution_id": { "type": "string", "format": "uuid" },
+    "run_id": { "type": "string", "format": "uuid" },
+    "attempt_id": { "type": "string", "format": "uuid" },
+    "workflow_instance_name": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,99}$" },
+    "simulation_key": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,99}$" },
+    "input": { "type": "object", "description": "Copia del input recibido para esta ejecución." },
+    "output": { "description": "Salida específica de la simulación; su schema concreto se definirá para cada simulación." }
+  }
+}

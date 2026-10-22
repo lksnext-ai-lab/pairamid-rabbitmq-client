@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://itool.example/schemas/simulation-execution-error-payload/1.0",
+  "title": "Payload de error definitivo de una ejecución de simulación",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "simulation_execution_id", "run_id", "attempt_id", "workflow_instance_name", "simulation_key", "finished_at", "error"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "simulation_execution_id": { "type": "string", "format": "uuid" },
+    "run_id": { "type": "string", "format": "uuid" },
+    "attempt_id": { "type": "string", "format": "uuid" },
+    "workflow_instance_name": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,99}$" },
+    "simulation_key": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,99}$" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,99}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "retryable": { "const": false }
+      }
+    }
+  }
+}
