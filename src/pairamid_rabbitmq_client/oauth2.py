@@ -11,8 +11,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-def token_username(token: str) -> str:
-    """Read identity metadata; signature/issuer/audience verification belongs to the broker."""
+def token_claims(token: str) -> dict[str, object]:
+    """Read JWT claims for local configuration; signature verification belongs to RabbitMQ."""
     try:
         parts = token.split(".")
         if len(parts) != 3:
@@ -23,8 +23,14 @@ def token_username(token: str) -> str:
             raise ValueError("Expected JWT claims object")
     except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
         raise ValueError(
-            "Cannot read OAuth identity; configure user_id explicitly or set_user_id=False"
+            "Cannot read OAuth JWT claims; the access token must be a three-part JWT"
         ) from exc
+    return claims
+
+
+def token_username(token: str) -> str:
+    """Read identity metadata; signature/issuer/audience verification belongs to the broker."""
+    claims = token_claims(token)
     for name in ("preferred_username", "client_id"):
         value = claims.get(name)
         if isinstance(value, str) and value:
@@ -77,3 +83,7 @@ class ClientCredentialsTokenProvider:
         self._access_token = access_token
         self._expires_at = now + int(expires_in)
         return access_token
+
+    def get_claims(self) -> dict[str, object]:
+        """Return claims from the same cached token used for the current connection."""
+        return token_claims(self.get_token())

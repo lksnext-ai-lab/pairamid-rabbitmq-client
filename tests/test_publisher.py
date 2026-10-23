@@ -126,6 +126,21 @@ class PublisherTests(unittest.TestCase):
                     props = self.channel.basic_publish.call_args.kwargs["properties"]
                     self.assertEqual(props.user_id, expected)
 
+    def test_token_claims_are_available_from_the_active_client_credentials_token(self):
+        claims = {
+            "preferred_username": "service-account-irtjv-rabbitmq-client",
+            "partner_id": "irtjv",
+            "simulation_queues": ["pairamid.input.irtjv.lri"],
+        }
+        with patch(
+            "pairamid_rabbitmq_client.oauth2.ClientCredentialsTokenProvider.get_token",
+            return_value=jwt(claims),
+        ):
+            with Publisher(**SETTINGS) as client:
+                self.assertEqual(client.get_token_claims()["simulation_queues"], [
+                    "pairamid.input.irtjv.lri"
+                ])
+
     def test_failed_channel_initialization_closes_connection(self):
         self.channel.confirm_delivery.side_effect = pika.exceptions.ChannelClosedByBroker(403, "no")
         client = Publisher(**SETTINGS)
@@ -178,6 +193,26 @@ class PublisherTests(unittest.TestCase):
         for partner in ("", "upperCASE", "irtjv.other", "a*", "x/y"):
             with self.subTest(partner=partner), self.assertRaises(ValueError):
                 PartnerClient(partner, **SETTINGS)
+
+    def test_partner_event_can_route_from_token_assignment(self):
+        event = build_input_downloaded_event(example("simulation-execution-message"))
+        with PartnerClient(**SETTINGS, events_exchange="events") as client:
+            client.publish_event(
+                event["event_type"],
+                event,
+                event["event_id"],
+                partner_id="irtjv",
+            )
+            self.assertEqual(
+                self.channel.basic_publish.call_args.kwargs["routing_key"],
+                "irtjv.input_downloaded",
+            )
+            with self.assertRaisesRegex(ValueError, "partner_id"):
+                client.publish_event(
+                    event["event_type"],
+                    event,
+                    event["event_id"],
+                )
 
 
 if __name__ == "__main__":

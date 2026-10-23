@@ -38,7 +38,7 @@ class PartnerClient(Consumer):
 
     def __init__(
         self,
-        partner_id: str,
+        partner_id: str | None = None,
         host: str | None = None,
         port: int | None = None,
         vhost: str | None = None,
@@ -54,7 +54,8 @@ class PartnerClient(Consumer):
         user_id: str | None = None,
         set_user_id: bool = True,
     ) -> None:
-        _validate_partner(partner_id)
+        if partner_id is not None:
+            _validate_partner(partner_id)
         self.partner_id = partner_id
         self.events_exchange = (
             events_exchange
@@ -62,7 +63,9 @@ class PartnerClient(Consumer):
             else os.environ.get("RABBITMQ_EVENTS_EXCHANGE", "simulation_events_exchange")
         )
         self.input_queue = (
-            input_queue if input_queue is not None else f"pairamid.input.{partner_id}"
+            input_queue
+            if input_queue is not None
+            else f"pairamid.input.{partner_id}" if partner_id is not None else ""
         )
         self.results_queue = results_queue if results_queue is not None else "pairamid.results"
         super().__init__(
@@ -80,6 +83,8 @@ class PartnerClient(Consumer):
 
     def execution_queue(self, simulation_key: str) -> str:
         """Return the provisioned queue name; does not start the new adapter mode."""
+        if self.partner_id is None:
+            raise ValueError("partner_id is required to build an execution queue")
         _validate_simulation(simulation_key)
         return f"pairamid.input.{self.partner_id}.{simulation_key}"
 
@@ -88,8 +93,12 @@ class PartnerClient(Consumer):
         event_type: str,
         body: Mapping[str, Any],
         message_id: str,
+        *,
+        partner_id: str | None = None,
     ) -> None:
         """Publish a validated event on an already open connection."""
+        event_partner_id = partner_id if partner_id is not None else self.partner_id
+        _validate_partner(event_partner_id)
         if event_type == "simulation_execution.input_downloaded":
             validate_input_downloaded_event(body)
             suffix = "input_downloaded"
@@ -104,7 +113,7 @@ class PartnerClient(Consumer):
             raise ValueError("message_id must match event_id")
         self.publish(
             self.events_exchange,
-            f"{self.partner_id}.{suffix}",
+            f"{event_partner_id}.{suffix}",
             json.dumps(dict(body), ensure_ascii=False, allow_nan=False),
             message_id=message_id,
             correlation_id=str(body["simulation_execution_id"]),

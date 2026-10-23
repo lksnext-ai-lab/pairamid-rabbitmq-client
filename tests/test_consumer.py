@@ -129,6 +129,50 @@ class ConsumerPollingTests(unittest.TestCase):
         self.assertEqual(processed, 2)
         self.assertEqual(channel.basic_get.call_count, 2)
 
+    def test_poll_queues_gives_each_queue_a_turn_and_exposes_source(self) -> None:
+        consumer = self.make_consumer()
+        channel = MagicMock()
+        queue_one = "pairamid.input.irtjv.lri"
+        queue_two = "pairamid.input.irtjv.xray"
+        channel.basic_get.side_effect = [
+            (make_delivery_frame(1, routing_key="irtjv.lri"), pika.BasicProperties(), b"one"),
+            (make_delivery_frame(2, routing_key="irtjv.xray"), pika.BasicProperties(), b"two"),
+        ]
+        consumer._channel = channel
+        seen: list[tuple[str | None, bytes]] = []
+
+        def acknowledge(delivery: Delivery) -> None:
+            seen.append((delivery.source_queue, delivery.body))
+            delivery.ack()
+
+        def queue_provider() -> list[str]:
+            self.assertIsNotNone(consumer._channel)
+            return [queue_one, queue_two]
+
+        with patch.object(consumer, "connect"), patch.object(consumer, "close"):
+            processed = consumer.poll_queues(queue_provider, acknowledge)
+
+        self.assertEqual(processed, 2)
+        self.assertEqual(
+            seen,
+            [(queue_one, b"one"), (queue_two, b"two")],
+        )
+        self.assertEqual(
+            [call.kwargs["queue"] for call in channel.basic_get.call_args_list],
+            [queue_one, queue_two],
+        )
+        self.assertEqual(channel.basic_ack.call_count, 2)
+
+    def test_poll_queues_rejects_duplicate_queues_before_connecting(self) -> None:
+        consumer = self.make_consumer()
+        with patch.object(consumer, "connect") as connect:
+            with self.assertRaisesRegex(ValueError, "unique"):
+                consumer.poll_queues(
+                    ["pairamid.input.irtjv.lri", "pairamid.input.irtjv.lri"],
+                    lambda item: item.ack(),
+                )
+        connect.assert_not_called()
+
     def test_poll_rejects_invalid_max_messages_before_connecting(self) -> None:
         consumer = self.make_consumer()
         with patch.object(consumer, "connect") as connect:

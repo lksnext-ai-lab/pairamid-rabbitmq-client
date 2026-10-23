@@ -2,7 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pairamid_rabbitmq_client.partner.config import PartnerSettings
+from pairamid_rabbitmq_client.partner.config import (
+    PartnerSettings,
+    parse_queue_assignments,
+)
 
 
 def make_environment(simulation_dir: str = "./simulations") -> dict[str, str]:
@@ -16,17 +19,24 @@ def make_environment(simulation_dir: str = "./simulations") -> dict[str, str]:
 
 
 class PartnerSettingsTests(unittest.TestCase):
-    def test_defaults_and_single_queue_configuration(self) -> None:
+    def test_defaults_and_simulation_directories(self) -> None:
         settings = PartnerSettings.from_env(make_environment())
 
         self.assertEqual(settings.host, "rabbitmq")
         self.assertEqual(settings.port, 5672)
         self.assertEqual(settings.vhost, "/")
         self.assertEqual(settings.poll_interval_seconds, 30)
-        self.assertEqual(settings.queue, "pairamid.input.irtjv.lri")
-        self.assertEqual(settings.routing_key, "irtjv.lri")
-        self.assertEqual(settings.input_dir, Path("./simulations/input"))
-        self.assertEqual(settings.results_dir, Path("./simulations/results"))
+        self.assertEqual(settings.expected_partner_id, "irtjv")
+        self.assertEqual(settings.input_dir_for("lri"), Path("./simulations/lri/input"))
+        self.assertEqual(settings.results_dir_for("lri"), Path("./simulations/lri/results"))
+
+    def test_partner_id_is_an_optional_token_consistency_guard(self) -> None:
+        environment = make_environment()
+        del environment["PARTNER_ID"]
+
+        settings = PartnerSettings.from_env(environment)
+
+        self.assertIsNone(settings.expected_partner_id)
 
     def test_custom_connection_and_polling_values(self) -> None:
         environment = make_environment("/tmp/irtjv-data")
@@ -54,11 +64,11 @@ class PartnerSettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "RABBITMQ_CLIENT_SECRET"):
             PartnerSettings.from_env(environment)
 
-    def test_only_irtjv_is_supported_for_this_adapter(self) -> None:
+    def test_invalid_partner_id_guard_is_rejected(self) -> None:
         environment = make_environment()
-        environment["PARTNER_ID"] = "another-partner"
+        environment["PARTNER_ID"] = "invalid.partner"
 
-        with self.assertRaisesRegex(ValueError, "only PARTNER_ID=irtjv"):
+        with self.assertRaisesRegex(ValueError, "valid lowercase partner"):
             PartnerSettings.from_env(environment)
 
     def test_invalid_port_and_poll_interval_are_rejected(self) -> None:
@@ -78,17 +88,68 @@ class PartnerSettingsTests(unittest.TestCase):
                 make_environment(str(Path(temporary_directory) / "simulations"))
             )
 
-            settings.prepare_directories()
+            settings.prepare_directories(("lri", "xray"))
 
             for relative_path in (
-                "input",
-                "input/.tmp",
-                "results",
-                "rejected/input",
-                "rejected/results",
-                "state",
+                "lri/input",
+                "lri/input/.tmp",
+                "lri/results",
+                "lri/rejected/input",
+                "lri/rejected/results",
+                "lri/state",
+                "xray/input",
+                "xray/results",
             ):
                 self.assertTrue((settings.simulation_dir / relative_path).is_dir())
+
+    def test_queue_assignments_are_parsed_from_token_claims(self) -> None:
+        assignments = parse_queue_assignments(
+            {
+                "partner_id": "irtjv",
+                "simulation_queues": [
+                    "pairamid.input.irtjv.lri",
+                    "pairamid.input.irtjv.xray",
+                ],
+            }
+        )
+
+        self.assertEqual(
+            assignments,
+            {
+                "pairamid.input.irtjv.lri": ("irtjv", "lri"),
+                "pairamid.input.irtjv.xray": ("irtjv", "xray"),
+            },
+        )
+
+    def test_queue_assignment_rejects_bad_claim_shapes_and_foreign_queues(self) -> None:
+        invalid_claims = (
+            {},
+            {"partner_id": "irtjv", "simulation_queues": "pairamid.input.irtjv.lri"},
+            {"partner_id": "irtjv", "simulation_queues": []},
+            {"partner_id": "irtjv", "simulation_queues": ["pairamid.input.irtjv.*"]},
+            {
+                "partner_id": "irtjv",
+                "simulation_queues": [
+                    "pairamid.input.irtjv.lri",
+                    "pairamid.input.irtjv.lri",
+                ],
+            },
+            {"partner_id": "irtjv", "simulation_queues": ["pairamid.input.other.lri"]},
+            {"partner_id": "irtjv", "simulation_queues": ["pairamid.input.irtjv./x"]},
+        )
+        for claims in invalid_claims:
+            with self.subTest(claims=claims), self.assertRaises(ValueError):
+                parse_queue_assignments(claims)
+
+    def test_queue_assignment_checks_optional_local_partner_id(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            parse_queue_assignments(
+                {
+                    "partner_id": "irtjv",
+                    "simulation_queues": ["pairamid.input.irtjv.lri"],
+                },
+                expected_partner_id="other",
+            )
 
 
 if __name__ == "__main__":

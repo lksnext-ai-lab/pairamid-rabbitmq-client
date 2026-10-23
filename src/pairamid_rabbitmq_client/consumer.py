@@ -8,7 +8,7 @@ import math
 import os
 import re
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -20,10 +20,20 @@ from .publisher import Publisher
 logger = logging.getLogger(__name__)
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 MessageHandler = Callable[["Delivery"], None]
+QueueProvider = Callable[[], Sequence[str]]
 
 
 class _InvalidMessageError(ValueError):
     pass
+
+
+def _validate_queues(queues: Sequence[str]) -> None:
+    if isinstance(queues, (str, bytes)) or not isinstance(queues, Sequence) or not queues:
+        raise ValueError("queues must be a non-empty sequence of queue names")
+    if any(not isinstance(queue, str) or not queue for queue in queues):
+        raise ValueError("queue names must be non-empty strings")
+    if len(set(queues)) != len(queues):
+        raise ValueError("queue names must be unique")
 
 
 class Delivery:
@@ -38,6 +48,7 @@ class Delivery:
         headers: Mapping[str, Any] | None,
         redelivered: bool,
         routing_key: str,
+        source_queue: str | None = None,
     ) -> None:
         self.body = body
         self.properties = properties
@@ -45,6 +56,7 @@ class Delivery:
         self.delivery_tag = delivery_tag
         self.redelivered = redelivered
         self.routing_key = routing_key
+        self.source_queue = source_queue
         self._channel = channel
         self._responded = False
 
@@ -138,14 +150,34 @@ class Consumer(Publisher):
         """
         if not isinstance(queue, str) or not queue:
             raise ValueError("queue must be a non-empty string")
+        return self.poll_queues(
+            (queue,),
+            handler,
+            max_messages_per_queue=max_messages,
+        )
+
+    def poll_queues(
+        self,
+        queues: Sequence[str] | QueueProvider,
+        handler: MessageHandler,
+        *,
+        max_messages_per_queue: int | None = 1,
+    ) -> int:
+        """Poll assigned queues in order, bounding work per queue for fairness.
+
+        A queue provider is resolved after connecting, so its values can be
+        derived from the exact cached access token used by the connection.
+        """
         if not callable(handler):
             raise TypeError("handler must be callable")
-        if max_messages is not None and (
-            isinstance(max_messages, bool)
-            or not isinstance(max_messages, int)
-            or max_messages <= 0
+        if max_messages_per_queue is not None and (
+            isinstance(max_messages_per_queue, bool)
+            or not isinstance(max_messages_per_queue, int)
+            or max_messages_per_queue <= 0
         ):
-            raise ValueError("max_messages must be a positive integer or None")
+            raise ValueError("max_messages_per_queue must be a positive integer or None")
+        if not callable(queues):
+            _validate_queues(queues)
 
         processed = 0
         try:
@@ -154,55 +186,94 @@ class Consumer(Publisher):
             if channel is None:
                 raise RuntimeError("RabbitMQ connection did not provide a channel")
 
-            while not self._stop_event.is_set() and (
-                max_messages is None or processed < max_messages
-            ):
-                method_frame, properties, body = channel.basic_get(
-                    queue=queue, auto_ack=False
-                )
-                if method_frame is None:
-                    break
-                if (
-                    method_frame.delivery_tag is None
-                    or not isinstance(body, bytes)
-                    or not isinstance(method_frame.redelivered, bool)
-                    or not isinstance(method_frame.routing_key, str)
+            selected_queues = queues() if callable(queues) else queues
+            _validate_queues(selected_queues)
+            for queue in selected_queues:
+                handled_from_queue = 0
+                while not self._stop_event.is_set() and (
+                    max_messages_per_queue is None
+                    or handled_from_queue < max_messages_per_queue
                 ):
-                    raise RuntimeError("RabbitMQ returned an invalid delivery frame")
+                    method_frame, properties, body = channel.basic_get(
+                        queue=queue, auto_ack=False
+                    )
+                    if method_frame is None:
+                        break
+                    if (
+                        method_frame.delivery_tag is None
+                        or not isinstance(body, bytes)
+                        or not isinstance(method_frame.redelivered, bool)
+                        or not isinstance(method_frame.routing_key, str)
+                    ):
+                        raise RuntimeError("RabbitMQ returned an invalid delivery frame")
 
-                headers = properties.headers if properties is not None else None
-                delivery = Delivery(
-                    channel=channel,
-                    delivery_tag=method_frame.delivery_tag,
-                    body=body,
-                    properties=properties,
-                    headers=headers,
-                    redelivered=method_frame.redelivered,
-                    routing_key=method_frame.routing_key,
-                )
-                processed += 1
-                try:
-                    handler(delivery)
-                    if not delivery.responded:
-                        logger.error(
-                            "Handler returned without responding to delivery %s from %s",
+                    headers = properties.headers if properties is not None else None
+                    delivery = Delivery(
+                        channel=channel,
+                        delivery_tag=method_frame.delivery_tag,
+                        body=body,
+                        properties=properties,
+                        headers=headers,
+                        redelivered=method_frame.redelivered,
+                        routing_key=method_frame.routing_key,
+                        source_queue=queue,
+                    )
+                    processed += 1
+                    handled_from_queue += 1
+                    try:
+                        handler(delivery)
+                        if not delivery.responded:
+                            logger.error(
+                                "Handler returned without responding to delivery %s from %s",
+                                delivery.delivery_tag,
+                                queue,
+                            )
+                            delivery.nack(requeue=True)
+                            raise RuntimeError(
+                                "Message handler returned without ack, reject, or nack"
+                            )
+                    except Exception:
+                        logger.exception(
+                            "Message handler failed for delivery %s from %s",
                             delivery.delivery_tag,
                             queue,
                         )
-                        delivery.nack(requeue=True)
-                        raise RuntimeError("Message handler returned without ack, reject, or nack")
-                except Exception:
-                    logger.exception(
-                        "Message handler failed for delivery %s from %s",
-                        delivery.delivery_tag,
-                        queue,
-                    )
-                    if not delivery.responded:
-                        delivery.nack(requeue=True)
-                    raise
+                        if not delivery.responded:
+                            delivery.nack(requeue=True)
+                        raise
             return processed
         finally:
             self.close()
+
+    def poll_forever_queues(
+        self,
+        queues: Sequence[str] | QueueProvider,
+        handler: MessageHandler,
+        *,
+        max_messages_per_queue: int = 1,
+    ) -> None:
+        """Poll all assigned queues fairly until stop() is called."""
+        if not callable(queues):
+            _validate_queues(queues)
+        if not callable(handler):
+            raise TypeError("handler must be callable")
+        if (
+            isinstance(max_messages_per_queue, bool)
+            or not isinstance(max_messages_per_queue, int)
+            or max_messages_per_queue <= 0
+        ):
+            raise ValueError("max_messages_per_queue must be a positive integer")
+
+        while not self._stop_event.is_set():
+            try:
+                self.poll_queues(
+                    queues,
+                    handler,
+                    max_messages_per_queue=max_messages_per_queue,
+                )
+            except Exception:
+                logger.exception("RabbitMQ multi-queue polling cycle failed")
+            self._stop_event.wait(self.poll_interval_seconds)
 
     def poll_once(self, queue: str) -> Path | None:
         """Fetch at most one legacy message, persist it, and acknowledge it."""

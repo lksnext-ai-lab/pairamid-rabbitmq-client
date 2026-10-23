@@ -36,8 +36,17 @@ def make_delivery(body: bytes, routing_key: str = "irtjv.lri") -> tuple[Delivery
         headers=None,
         redelivered=False,
         routing_key=routing_key,
+        source_queue="pairamid.input.irtjv.lri",
     )
     return delivery, channel
+
+
+def make_adapter(settings: PartnerSettings) -> PartnerAdapter:
+    adapter = PartnerAdapter(settings)
+    adapter._current_assignments = {
+        "pairamid.input.irtjv.lri": ("irtjv", "lri"),
+    }
+    return adapter
 
 
 def execution_message() -> dict[str, object]:
@@ -48,12 +57,12 @@ class PartnerAdapterTests(unittest.TestCase):
     def test_invalid_json_is_rejected_without_requeue(self) -> None:
         with TemporaryDirectory() as directory:
             settings = make_settings(directory)
-            adapter = PartnerAdapter(settings)
+            adapter = make_adapter(settings)
             delivery, channel = make_delivery(b"not-json")
 
             with self.assertLogs("pairamid_rabbitmq_client.partner.adapter", level="WARNING"):
                 adapter.handle_execution(delivery)
-            archived_body = next(settings.rejected_input_dir.glob("*.body"))
+            archived_body = next(settings.rejected_input_dir_for("lri").glob("*.body"))
             self.assertEqual(archived_body.read_bytes(), b"not-json")
 
         channel.basic_reject.assert_called_once_with(delivery_tag=1, requeue=False)
@@ -65,7 +74,7 @@ class PartnerAdapterTests(unittest.TestCase):
         message["schema_version"] = "invalid"
         with TemporaryDirectory() as directory:
             settings = make_settings(directory)
-            adapter = PartnerAdapter(settings)
+            adapter = make_adapter(settings)
             delivery, channel = make_delivery(json.dumps(message).encode())
 
             with self.assertLogs("pairamid_rabbitmq_client.partner.adapter", level="WARNING"):
@@ -78,7 +87,7 @@ class PartnerAdapterTests(unittest.TestCase):
         message["simulation_key"] = "another"
         with TemporaryDirectory() as directory:
             settings = make_settings(directory)
-            adapter = PartnerAdapter(settings)
+            adapter = make_adapter(settings)
             delivery, channel = make_delivery(json.dumps(message).encode(), "irtjv.another")
 
             with self.assertLogs("pairamid_rabbitmq_client.partner.adapter", level="WARNING"):
@@ -90,16 +99,23 @@ class PartnerAdapterTests(unittest.TestCase):
         message = execution_message()
         with TemporaryDirectory() as directory:
             settings = make_settings(directory)
-            adapter = PartnerAdapter(settings)
+            adapter = make_adapter(settings)
             delivery, channel = make_delivery(json.dumps(message).encode())
             operations: list[str] = []
 
-            def publish_event(event_type: str, event: dict[str, object], message_id: str) -> None:
+            def publish_event(
+                event_type: str,
+                event: dict[str, object],
+                message_id: str,
+                *,
+                partner_id: str,
+            ) -> None:
                 operations.append("publish")
+                self.assertEqual(partner_id, "irtjv")
                 self.assertEqual(event_type, "simulation_execution.input_downloaded")
                 self.assertEqual(message_id, event["event_id"])
                 input_path = (
-                    settings.input_dir
+                    settings.input_dir_for("lri")
                     / f"input-irtjv-lri-{message['simulation_execution_id']}.json"
                 )
                 self.assertEqual(json.loads(input_path.read_text()), message["input"])
@@ -110,8 +126,8 @@ class PartnerAdapterTests(unittest.TestCase):
             with self.assertLogs("pairamid_rabbitmq_client.partner.adapter", level="INFO"):
                 adapter.handle_execution(delivery)
 
-            input_path = settings.input_dir / "input-irtjv-lri-1.json"
-            state_path = settings.state_dir / "input-irtjv-lri-1.json"
+            input_path = settings.input_dir_for("lri") / "input-irtjv-lri-1.json"
+            state_path = settings.state_dir_for("lri") / "input-irtjv-lri-1.json"
             self.assertEqual(operations, ["publish", "ack"])
             self.assertEqual(json.loads(input_path.read_text()), message["input"])
             self.assertEqual(
@@ -124,11 +140,43 @@ class PartnerAdapterTests(unittest.TestCase):
         channel.basic_nack.assert_not_called()
         channel.basic_reject.assert_not_called()
 
+    def test_adapter_materializes_non_lri_simulation_from_assigned_queue(self) -> None:
+        message = execution_message()
+        message["simulation_key"] = "xray"
+        with TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            adapter = make_adapter(settings)
+            queue = "pairamid.input.irtjv.xray"
+            adapter._current_assignments[queue] = ("irtjv", "xray")
+            delivery, channel = make_delivery(
+                json.dumps(message).encode(),
+                routing_key="irtjv.xray",
+            )
+            delivery.source_queue = queue
+            adapter.client.publish_event = MagicMock()
+
+            adapter.handle_execution(delivery)
+
+            input_path = settings.input_dir_for("xray") / "input-irtjv-xray-1.json"
+            state_path = settings.state_dir_for("xray") / "input-irtjv-xray-1.json"
+            self.assertEqual(json.loads(input_path.read_text()), message["input"])
+            self.assertEqual(
+                json.loads(state_path.read_text())["execution_message"],
+                message,
+            )
+
+        channel.basic_ack.assert_called_once_with(delivery_tag=1)
+        adapter.client.publish_event.assert_called_once()
+        self.assertEqual(
+            adapter.client.publish_event.call_args.kwargs["partner_id"],
+            "irtjv",
+        )
+
     def test_duplicate_delivery_reuses_input_and_skips_confirmed_event(self) -> None:
         message = execution_message()
         with TemporaryDirectory() as directory:
             settings = make_settings(directory)
-            adapter = PartnerAdapter(settings)
+            adapter = make_adapter(settings)
             adapter.client.publish_event = MagicMock()
 
             for delivery_tag in (1, 2):
@@ -136,16 +184,19 @@ class PartnerAdapterTests(unittest.TestCase):
                 delivery.delivery_tag = delivery_tag
                 adapter.handle_execution(delivery)
 
-            input_files = list(settings.input_dir.glob("input-*.json"))
+            input_files = list(settings.input_dir_for("lri").glob("input-*.json"))
             self.assertEqual(len(input_files), 1)
-            self.assertEqual(len(list(settings.state_dir.glob("input-*.json"))), 1)
+            self.assertEqual(
+                len(list(settings.state_dir_for("lri").glob("input-*.json"))),
+                1,
+            )
 
         adapter.client.publish_event.assert_called_once()
 
     def test_publish_failure_requeues_without_ack_and_retry_reuses_event_id(self) -> None:
         message = execution_message()
         with TemporaryDirectory() as directory:
-            adapter = PartnerAdapter(make_settings(directory))
+            adapter = make_adapter(make_settings(directory))
             adapter.client.publish_event = MagicMock(
                 side_effect=[PublishConnectionError("broker unavailable"), None]
             )
@@ -170,7 +221,7 @@ class PartnerAdapterTests(unittest.TestCase):
         message = execution_message()
         with TemporaryDirectory() as directory:
             settings = make_settings(directory)
-            adapter = PartnerAdapter(settings)
+            adapter = make_adapter(settings)
             adapter.client.publish_event = MagicMock()
             first_delivery, first_channel = make_delivery(json.dumps(message).encode())
             first_channel.basic_ack.side_effect = RuntimeError("connection lost during ack")
@@ -183,8 +234,14 @@ class PartnerAdapterTests(unittest.TestCase):
             retry_delivery.delivery_tag = 2
             adapter.handle_execution(retry_delivery)
 
-            self.assertEqual(len(list(settings.input_dir.glob("input-*.json"))), 1)
-            self.assertEqual(len(list(settings.state_dir.glob("input-*.json"))), 1)
+            self.assertEqual(
+                len(list(settings.input_dir_for("lri").glob("input-*.json"))),
+                1,
+            )
+            self.assertEqual(
+                len(list(settings.state_dir_for("lri").glob("input-*.json"))),
+                1,
+            )
 
         adapter.client.publish_event.assert_called_once()
         retry_channel.basic_ack.assert_called_once_with(delivery_tag=2)
@@ -195,7 +252,7 @@ class PartnerAdapterTests(unittest.TestCase):
         conflicting_message["input"] = {"different": True}
         with TemporaryDirectory() as directory:
             settings = make_settings(directory)
-            adapter = PartnerAdapter(settings)
+            adapter = make_adapter(settings)
             adapter.client.publish_event = MagicMock()
             original_delivery, _ = make_delivery(json.dumps(message).encode())
             adapter.handle_execution(original_delivery)
@@ -207,7 +264,7 @@ class PartnerAdapterTests(unittest.TestCase):
             with self.assertLogs("pairamid_rabbitmq_client.partner.adapter", level="WARNING"):
                 adapter.handle_execution(conflict_delivery)
 
-            archived_body = next(settings.rejected_input_dir.glob("*.body"))
+            archived_body = next(settings.rejected_input_dir_for("lri").glob("*.body"))
             self.assertEqual(archived_body.read_bytes(), conflict_delivery.body)
 
         channel.basic_reject.assert_called_once_with(delivery_tag=2, requeue=False)
@@ -218,7 +275,7 @@ class PartnerAdapterTests(unittest.TestCase):
     def test_disk_error_requeues_delivery(self) -> None:
         message = execution_message()
         with TemporaryDirectory() as directory:
-            adapter = PartnerAdapter(make_settings(directory))
+            adapter = make_adapter(make_settings(directory))
             delivery, channel = make_delivery(json.dumps(message).encode())
 
             with (
@@ -236,7 +293,7 @@ class PartnerAdapterTests(unittest.TestCase):
 
     def test_rejection_archive_error_requeues_without_rejecting(self) -> None:
         with TemporaryDirectory() as directory:
-            adapter = PartnerAdapter(make_settings(directory))
+            adapter = make_adapter(make_settings(directory))
             delivery, channel = make_delivery(b"not-json")
 
             with (
@@ -251,6 +308,43 @@ class PartnerAdapterTests(unittest.TestCase):
         channel.basic_nack.assert_called_once_with(delivery_tag=1, requeue=True)
         channel.basic_reject.assert_not_called()
         channel.basic_ack.assert_not_called()
+
+    def test_queue_assignment_is_loaded_from_token_for_each_cycle(self) -> None:
+        with TemporaryDirectory() as directory:
+            adapter = PartnerAdapter(make_settings(directory))
+            adapter.client.get_token_claims = MagicMock(
+                return_value={
+                    "partner_id": "irtjv",
+                    "simulation_queues": [
+                        "pairamid.input.irtjv.lri",
+                        "pairamid.input.irtjv.xray",
+                    ],
+                }
+            )
+
+            queues = adapter._queues_for_current_token()
+
+        self.assertEqual(
+            queues,
+            ("pairamid.input.irtjv.lri", "pairamid.input.irtjv.xray"),
+        )
+        self.assertEqual(
+            adapter._current_assignments["pairamid.input.irtjv.xray"],
+            ("irtjv", "xray"),
+        )
+        adapter.client.get_token_claims.assert_called_once()
+
+    def test_message_must_match_source_queue_key_and_routing_key(self) -> None:
+        message = execution_message()
+        with TemporaryDirectory() as directory:
+            adapter = make_adapter(make_settings(directory))
+            delivery, channel = make_delivery(json.dumps(message).encode(), "irtjv.wrong")
+            with self.assertLogs("pairamid_rabbitmq_client.partner.adapter", level="WARNING"):
+                adapter.handle_execution(delivery)
+
+        channel.basic_reject.assert_called_once_with(delivery_tag=1, requeue=False)
+        adapter.client.publish_event = MagicMock()
+        adapter.client.publish_event.assert_not_called()
 
 
 if __name__ == "__main__":

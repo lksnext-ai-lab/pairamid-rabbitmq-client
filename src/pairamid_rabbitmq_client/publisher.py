@@ -88,6 +88,10 @@ class Publisher:
             client_secret=self.client_secret,
         )
 
+    def get_token_claims(self) -> dict[str, object]:
+        """Read claims from the Keycloak token used by the active connection."""
+        return self._token_provider.get_claims()
+
     def publish(
         self,
         exchange: str | None = None,

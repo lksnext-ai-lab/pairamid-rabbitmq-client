@@ -1,1 +1,1 @@
-"""IRTJV partner adapter."""
+"""Partner adapter driven by Keycloak queue-assignment claims."""

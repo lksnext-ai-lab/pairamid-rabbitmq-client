@@ -25,7 +25,7 @@ not passed explicitly:
 | `RABBITMQ_CLIENT_ID` | `platform-client` | OAuth2 client ID |
 | `RABBITMQ_CLIENT_SECRET` | `secret` | OAuth2 client secret |
 | `OAUTH2_TOKEN_URL` | `https://keycloak.example.com/realms/pairamid/protocol/openid-connect/token` | OAuth2 token endpoint |
-| `SIMULATION_DIR` | `./simulations` | Partner adapter root for input, results, rejected and internal state directories |
+| `SIMULATION_DIR` | `./simulations` | Root directory containing separate input, results, rejected and internal state folders for each simulation |
 | `CONSUMER_POLL_INTERVAL_SECONDS` | `30` | Delay between input queue polls |
 | `RABBITMQ_EXECUTION_EXCHANGE` | `simulation_execution_exchange` | Platform execution exchange |
 | `RABBITMQ_EVENTS_EXCHANGE` | `simulation_events_exchange` | Partner event exchange |
@@ -36,8 +36,11 @@ before clients connect; the library does not declare queues.
 
 ## Polling consumer
 
-The low-level consumer polls one queue per cycle. Omitting `max_messages`
-drains currently available messages; pass a positive limit to bound a cycle.
+The low-level consumer can poll one queue with `poll()` or a set of queues with
+`poll_queues()`. Multi-queue polling defaults to one delivery per queue per cycle
+to give each assigned queue a turn; `source_queue` identifies where each
+delivery came from. A queue provider is resolved after connection, allowing the
+queue set to come from the same access token used for RabbitMQ authentication.
 Each handler must explicitly acknowledge, reject, or negatively acknowledge its
 delivery. An unhandled exception or a handler that returns without responding
 is logged and nacked with requeue enabled.
@@ -53,6 +56,10 @@ consumer = Consumer()
 consumer.poll_forever("pairamid.input.irtjv.lri", handle)
 ```
 
+For a fixed set of queues, use `poll_forever_queues(queues, handler)`. The
+partner adapter resolves its queue list from the token claims on every polling
+cycle instead of maintaining a local simulation list.
+
 Call `consumer.stop()` from the shutdown path to interrupt the polling wait.
 The current handler is allowed to finish before the loop stops and closes its
 connection. `poll_once(queue)` and `poll_forever(queue)` without a handler keep
@@ -61,9 +68,9 @@ in a later release; new consumers should pass a handler and decide when to ack.
 
 ## IRTJV partner adapter
 
-The adapter is included in this library and runs as a separate process. For this
-delivery it supports the single `irtjv/lri` execution queue and reads connection
-credentials and its local data root from the environment:
+The adapter is included in this library and runs as a separate process. It reads
+the partner identity and assigned queue names from the Keycloak access token;
+connection credentials and the local data root come from the environment:
 
 ```bash
 cp .env.example .env
@@ -74,23 +81,65 @@ set +a
 python -m pairamid_rabbitmq_client.partner
 ```
 
-The process creates `input/`, `results/`, `rejected/input/`,
-`rejected/results/` and `state/` under `SIMULATION_DIR`. `input/` and
-`results/` are the partner-facing folders; `state/` is adapter-managed.
+For every simulation assigned in the access token, the process creates
+`<simulation_key>/input/`, `<simulation_key>/results/`,
+`<simulation_key>/rejected/input/`, `<simulation_key>/rejected/results/` and
+`<simulation_key>/state/` under `SIMULATION_DIR`. `input/` and `results/` are
+the partner-facing folders; `state/` is adapter-managed.
 `SIGINT` and `SIGTERM` stop polling after the current handler finishes.
+The token must contain `partner_id` (a string) and `simulation_queues` (a
+non-empty JSON array of concrete queue names, for example
+`["pairamid.input.irtjv.lri"]`). `PARTNER_ID` in the environment is optional
+and, if provided, is checked against the token claim. RabbitMQ's `extra_scope`
+continues to enforce actual access; claims only assign/discover queues. The
+adapter checks each queue in token order, at most one message per queue per
+cycle. Missing/malformed claims, foreign queue names and broker access errors
+are reported explicitly; it does not fall back to `lri`.
 
 Valid executions write only their `input` value to
-`input/input-{partner_id}-{simulation_key}-{simulation_execution_id}.json`.
-Temporary files stay under `input/.tmp/`; durable execution context and event
-publication state are stored under `state/`. The adapter publishes the confirmed
+`<simulation_key>/input/input-{partner_id}-{simulation_key}-{simulation_execution_id}.json`.
+Temporary files stay under `<simulation_key>/input/.tmp/`; durable execution
+context and event publication state are stored under `<simulation_key>/state/`.
+The adapter publishes the confirmed
 `simulation_execution.input_downloaded` event before acknowledging the execution.
 Identical redeliveries reuse the input and event state; conflicting input for
-the same execution ID is archived under `rejected/input/` and rejected.
+the same execution ID is archived under
+`<simulation_key>/rejected/input/` and rejected.
 
 Invalid messages are archived with their rejection reason before rejection.
 Disk and broker failures are requeued. The adapter does not launch a simulation;
-the partner runs its tool independently. Real-broker integration tests remain
-required before publishing or deploying this workflow.
+the partner runs its tool independently. A real-broker smoke test against the
+development IRTJV/lri queue succeeded with client 0.0.6: the consumed message
+was a redelivery, its input was materialized, `input_downloaded` was confirmed,
+and the execution was acknowledged. Live polling with multiple provisioned
+queues and another partner still needs verification before broader rollout.
+
+### One-shot RabbitMQ smoke test
+
+After creating an execution through the API, stop any other consumer of the
+partner input queues and run the script. It checks every queue assigned in the
+token, reports if all are empty, and consumes at most one execution per assigned
+queue without requiring a database ID:
+
+```bash
+python scripts/smoke_test_partner_download.py
+```
+
+Run it with the Python environment where `pairamid-rabbitmq-client==0.0.6` is
+installed and the partner adapter environment variables (including
+`SIMULATION_DIR`) are set. The script does not publish a test execution; it
+consumes executions already published by the API. Run it with no competing
+consumer, because the partner account intentionally has no queue-inspection
+(`configure`) permission.
+
+When running from the host against the local development Compose stack, use
+the published host ports rather than Compose-only DNS names:
+
+```bash
+RABBITMQ_HOST=localhost \
+OAUTH2_TOKEN_URL=http://localhost:8080/realms/pairamid/protocol/openid-connect/token \
+python scripts/smoke_test_partner_download.py
+```
 
 ## Version 0.0.5: standalone simulations with version 2.0 contracts
 
