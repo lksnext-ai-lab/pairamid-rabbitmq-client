@@ -8,11 +8,17 @@ import re
 import time
 import warnings
 from collections.abc import Mapping
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
 from .consumer import Consumer
 from .contracts import (
+    CONTEXT_FIELDS,
+    build_failed_event,
+    build_result_payload,
+    build_succeeded_event,
+    validate_error_payload,
     validate_execution_message,
     validate_input_downloaded_event,
     validate_result_event,
@@ -120,16 +126,56 @@ class PartnerClient(Consumer):
             timestamp=int(time.time()),
         )
 
-    def publish_result(self, file_path: str | Path) -> None:
-        """Publish the contents of a result file to the shared results queue."""
-        warnings.warn(
-            "publish_result is deprecated; use publish_event with a result contract",
-            DeprecationWarning,
-            stacklevel=2,
+    def publish_result(
+        self,
+        file_path: str | Path,
+        execution_message: Mapping[str, Any],
+        *,
+        partner_id: str | None = None,
+        event: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish a result file as a validated success or failure event."""
+        result_partner_id = partner_id if partner_id is not None else self.partner_id
+        _validate_partner(result_partner_id)
+        event_body = (
+            self.build_result_event(file_path, execution_message)
+            if event is None
+            else dict(event)
         )
-        message = Path(file_path).read_bytes()
+        validate_execution_message(execution_message)
+        validate_result_event(event_body)
+        if any(event_body[key] != execution_message[key] for key in CONTEXT_FIELDS):
+            raise ValueError("Result event context does not match its execution input")
+
+        event_type = event_body["event_type"]
+        message_id = event_body["event_id"]
         with self:
-            self.publish(queue=self.results_queue, message=message)
+            self.publish_event(
+                event_type,
+                event_body,
+                message_id,
+                partner_id=result_partner_id,
+            )
+        return event_body
+
+    @staticmethod
+    def build_result_event(
+        file_path: str | Path,
+        execution_message: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build a contract event from a result JSON file and its saved input context."""
+        validate_execution_message(execution_message)
+        try:
+            result = json.loads(Path(file_path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, JSONDecodeError) as exc:
+            raise ValueError(f"Cannot read result JSON file {file_path}: {exc}") from exc
+        if isinstance(result, dict) and "error" in result:
+            validate_error_payload(result)
+            if any(result[key] != execution_message[key] for key in CONTEXT_FIELDS):
+                raise ValueError("Result error context does not match its execution input")
+            return build_failed_event(result)
+        result_payload = build_result_payload(execution_message, result)
+        return build_succeeded_event(result_payload)
 
 
 class PlatformClient(Publisher):

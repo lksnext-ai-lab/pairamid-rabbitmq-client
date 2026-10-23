@@ -6,10 +6,14 @@ from unittest.mock import MagicMock, patch
 
 import pika
 
-from pairamid_rabbitmq_client import Delivery
+from pairamid_rabbitmq_client import ContractValidationError, Delivery
 from pairamid_rabbitmq_client.exceptions import PublishConnectionError
 from pairamid_rabbitmq_client.partner.adapter import PartnerAdapter
 from pairamid_rabbitmq_client.partner.config import PartnerSettings
+from pairamid_rabbitmq_client.partner.storage import (
+    InputStateStore,
+    materialize_input,
+)
 
 EXAMPLES = Path(__file__).parent / "examples"
 
@@ -51,6 +55,17 @@ def make_adapter(settings: PartnerSettings) -> PartnerAdapter:
 
 def execution_message() -> dict[str, object]:
     return json.loads((EXAMPLES / "simulation-execution-message.json").read_text())
+
+
+def prepare_downloaded_input(settings: PartnerSettings, message: dict[str, object]) -> None:
+    input_path, _created = materialize_input(
+        message,
+        settings.input_dir_for("lri"),
+        "irtjv",
+    )
+    store = InputStateStore(settings.state_dir_for("lri"), "irtjv")
+    state = store.load_or_create(message, input_path)
+    store.mark_published(message, state)
 
 
 class PartnerAdapterTests(unittest.TestCase):
@@ -345,6 +360,167 @@ class PartnerAdapterTests(unittest.TestCase):
         channel.basic_reject.assert_called_once_with(delivery_tag=1, requeue=False)
         adapter.client.publish_event = MagicMock()
         adapter.client.publish_event.assert_not_called()
+
+    def test_manual_result_publication_uses_saved_context_and_correct_filename(self) -> None:
+        message = execution_message()
+        with TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            prepare_downloaded_input(settings, message)
+            results_dir = settings.results_dir_for("lri")
+            results_dir.mkdir(parents=True)
+            result_path = results_dir / "results-irtjv-lri-1.json"
+            result_path.write_text('{"status":"completed","value":42}', encoding="utf-8")
+
+            adapter = PartnerAdapter(settings)
+            adapter.client.get_token_claims = MagicMock(
+                return_value={
+                    "partner_id": "irtjv",
+                    "simulation_queues": ["pairamid.input.irtjv.lri"],
+                }
+            )
+            adapter.client.publish_result = MagicMock()
+
+            self.assertTrue(adapter.publish_result_file(result_path))
+            adapter.client.publish_result.assert_called_once()
+            published = adapter.client.publish_result.call_args
+            event = published.kwargs["event"]
+            self.assertEqual(event["event_type"], "simulation_execution.succeeded")
+            self.assertEqual(
+                event["result"]["payload"]["output"],
+                {"status": "completed", "value": 42},
+            )
+            self.assertEqual(
+                event["simulation_execution_id"],
+                message["simulation_execution_id"],
+            )
+
+            state = json.loads(
+                (settings.state_dir_for("lri") / "input-irtjv-lri-1.json").read_text()
+            )
+            self.assertTrue(state["result_published"])
+            self.assertEqual(state["result_event"], event)
+            self.assertFalse(adapter.publish_result_file(result_path))
+
+        adapter.client.publish_result.assert_called_once()
+
+    def test_manual_result_retry_reuses_event_id_after_ambiguous_failure(self) -> None:
+        message = execution_message()
+        with TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            prepare_downloaded_input(settings, message)
+            settings.results_dir_for("lri").mkdir(parents=True)
+            result_path = settings.results_dir_for("lri") / "results-irtjv-lri-1.json"
+            result_path.write_text('{"value":42}', encoding="utf-8")
+
+            adapter = PartnerAdapter(settings)
+            adapter.client.get_token_claims = MagicMock(
+                return_value={
+                    "partner_id": "irtjv",
+                    "simulation_queues": ["pairamid.input.irtjv.lri"],
+                }
+            )
+            adapter.client.publish_result = MagicMock(
+                side_effect=[PublishConnectionError("connection lost"), None]
+            )
+
+            with self.assertRaises(PublishConnectionError):
+                adapter.publish_result_file(result_path)
+            self.assertTrue(adapter.publish_result_file(result_path))
+
+            first_event = adapter.client.publish_result.call_args_list[0].kwargs["event"]
+            second_event = adapter.client.publish_result.call_args_list[1].kwargs["event"]
+            self.assertEqual(first_event["event_id"], second_event["event_id"])
+            state = json.loads(
+                (settings.state_dir_for("lri") / "input-irtjv-lri-1.json").read_text()
+            )
+            self.assertTrue(state["result_published"])
+
+    def test_manual_error_result_publishes_failed_event(self) -> None:
+        message = execution_message()
+        error = json.loads(
+            (EXAMPLES / "simulation-execution-error-payload.json").read_text()
+        )
+        for key in ("simulation_execution_id", "run_id", "attempt_id", "simulation_key"):
+            error[key] = message[key]
+        with TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            prepare_downloaded_input(settings, message)
+            settings.results_dir_for("lri").mkdir(parents=True)
+            result_path = settings.results_dir_for("lri") / "results-irtjv-lri-1.json"
+            result_path.write_text(json.dumps(error), encoding="utf-8")
+
+            adapter = PartnerAdapter(settings)
+            adapter.client.get_token_claims = MagicMock(
+                return_value={
+                    "partner_id": "irtjv",
+                    "simulation_queues": ["pairamid.input.irtjv.lri"],
+                }
+            )
+            adapter.client.publish_result = MagicMock()
+
+            self.assertTrue(adapter.publish_result_file(result_path))
+            event = adapter.client.publish_result.call_args.kwargs["event"]
+            self.assertEqual(event["event_type"], "simulation_execution.failed")
+            self.assertEqual(event["error"], error["error"])
+
+    def test_malformed_error_result_is_not_published_as_success(self) -> None:
+        message = execution_message()
+        error = json.loads(
+            (EXAMPLES / "simulation-execution-error-payload.json").read_text()
+        )
+        for key in ("simulation_execution_id", "run_id", "attempt_id", "simulation_key"):
+            error[key] = message[key]
+        del error["error"]["retryable"]
+        with TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            prepare_downloaded_input(settings, message)
+            settings.results_dir_for("lri").mkdir(parents=True)
+            result_path = settings.results_dir_for("lri") / "results-irtjv-lri-1.json"
+            result_path.write_text(json.dumps(error), encoding="utf-8")
+
+            adapter = PartnerAdapter(settings)
+            adapter.client.get_token_claims = MagicMock(
+                return_value={
+                    "partner_id": "irtjv",
+                    "simulation_queues": ["pairamid.input.irtjv.lri"],
+                }
+            )
+            adapter.client.publish_result = MagicMock()
+
+            with self.assertRaises(ContractValidationError):
+                adapter.publish_result_file(result_path)
+            adapter.client.publish_result.assert_not_called()
+            self.assertFalse(result_path.exists())
+            archived_body = next(
+                settings.rejected_results_dir_for("lri").glob("*.body")
+            )
+            archived_result = json.loads(archived_body.read_bytes())
+            self.assertEqual(
+                archived_result["error"]["code"],
+                "PARTNER_EXECUTION_FAILED",
+            )
+
+    def test_manual_result_rejects_wrong_name_and_unknown_context(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = make_settings(directory)
+            results_dir = settings.results_dir_for("lri")
+            results_dir.mkdir(parents=True)
+            wrong_name = results_dir / "result-irtjv-lri-1.json"
+            wrong_name.write_text('{"value":42}', encoding="utf-8")
+            orphan = results_dir / "results-irtjv-lri-999.json"
+            orphan.write_text('{"value":42}', encoding="utf-8")
+
+            adapter = PartnerAdapter(settings)
+            adapter.client.get_token_claims = MagicMock(
+                return_value={
+                    "partner_id": "irtjv",
+                    "simulation_queues": ["pairamid.input.irtjv.lri"],
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "Result filename"):
+                adapter.publish_result_file(wrong_name)
+            with self.assertRaises(FileNotFoundError):
+                adapter.publish_result_file(orphan)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,9 @@ from uuid import uuid4
 
 from pairamid_rabbitmq_client.contracts import (
     build_input_downloaded_event,
+    validate_execution_message,
     validate_input_downloaded_event,
+    validate_result_event,
 )
 from pairamid_rabbitmq_client.exceptions import ContractValidationError
 
@@ -147,6 +149,107 @@ class InputStateStore:
         state["input_downloaded_published"] = True
         self._write(state_path, state)
 
+    def load_for_result(self, simulation_key: str, execution_id: int) -> dict[str, Any]:
+        """Load an existing, confirmed input context for manual result publication."""
+        state_path = self.state_dir / (
+            f"input-{self.partner_id}-{simulation_key}-{execution_id}.json"
+        )
+        if state_path.is_symlink() or not state_path.is_file():
+            raise FileNotFoundError(f"No durable input context exists for {state_path.name}")
+        try:
+            stored_state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InputConflictError(f"Input state is corrupt: {state_path.name}") from exc
+        if not isinstance(stored_state, dict):
+            raise InputConflictError(f"Input state is invalid: {state_path.name}")
+        execution_message = stored_state.get("execution_message")
+        if not isinstance(execution_message, dict):
+            raise InputConflictError(f"Input state has no execution context: {state_path.name}")
+        try:
+            validate_execution_message(execution_message)
+        except ContractValidationError as exc:
+            raise InputConflictError(
+                f"Input state has an invalid execution context: {state_path.name}"
+            ) from exc
+        if (
+            execution_message["simulation_key"] != simulation_key
+            or execution_message["simulation_execution_id"] != execution_id
+        ):
+            raise InputConflictError(f"Input state does not match result name: {state_path.name}")
+
+        input_path = self.state_dir.parent / "input" / state_path.name
+        state = self.load_or_create(execution_message, input_path)
+        if not state["input_downloaded_published"]:
+            raise InputConflictError(
+                f"Input download event is not confirmed for execution {execution_id}"
+            )
+        result_event = state.get("result_event")
+        if result_event is not None:
+            if (
+                not isinstance(result_event, dict)
+                or not isinstance(state.get("result_published"), bool)
+            ):
+                raise InputConflictError(f"Result state is invalid: {state_path.name}")
+            validate_result_event(result_event)
+            if any(
+                result_event.get(key) != execution_message.get(key)
+                for key in ("simulation_execution_id", "run_id", "attempt_id", "simulation_key")
+            ):
+                raise InputConflictError(
+                    f"Stored result event does not match input context: {state_path.name}"
+                )
+        return state
+
+    def save_result_event(
+        self,
+        state: dict[str, Any],
+        result_sha256: str,
+        event: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a stable result event before publication so retries reuse its ID."""
+        validate_result_event(event)
+        execution_message = state.get("execution_message")
+        if not isinstance(execution_message, Mapping) or any(
+            event.get(key) != execution_message.get(key)
+            for key in ("simulation_execution_id", "run_id", "attempt_id", "simulation_key")
+        ):
+            raise InputConflictError("Result event does not match its input context")
+        existing_event = state.get("result_event")
+        existing_digest = state.get("result_sha256")
+        if existing_event is not None:
+            if existing_digest != result_sha256:
+                raise InputConflictError("Result file changed after publication was attempted")
+            if not isinstance(existing_event, dict):
+                raise InputConflictError("Stored result event is invalid")
+            validate_result_event(existing_event)
+            if any(
+                existing_event.get(key) != execution_message.get(key)
+                for key in ("simulation_execution_id", "run_id", "attempt_id", "simulation_key")
+            ):
+                raise InputConflictError("Stored result event does not match its input context")
+            return existing_event
+
+        state["result_event"] = dict(event)
+        state["result_sha256"] = result_sha256
+        state["result_published"] = False
+        self._write(self._state_path(state), state)
+        return dict(event)
+
+    def mark_result_published(self, state: dict[str, Any]) -> None:
+        if not isinstance(state.get("result_event"), dict):
+            raise InputConflictError("Cannot mark a result published without its event")
+        state["result_published"] = True
+        self._write(self._state_path(state), state)
+
+    def _state_path(self, state: Mapping[str, Any]) -> Path:
+        message = state.get("execution_message")
+        if not isinstance(message, Mapping):
+            raise InputConflictError("Stored input state has no execution context")
+        return self.state_dir / (
+            f"input-{self.partner_id}-{message['simulation_key']}-"
+            f"{message['simulation_execution_id']}.json"
+        )
+
     @staticmethod
     def _write(path: Path, state: Mapping[str, Any]) -> None:
         serialized = json.dumps(
@@ -195,6 +298,19 @@ def archive_rejected_message(
     finally:
         temporary_metadata.unlink(missing_ok=True)
     return body_path
+
+
+def archive_rejected_result(result_path: Path, rejected_dir: Path, reason: str) -> Path:
+    """Archive an invalid result before removing it from the partner-facing folder."""
+    archive_path = archive_rejected_message(
+        result_path.read_bytes(),
+        rejected_dir,
+        reason,
+        message_id=result_path.name,
+    )
+    result_path.unlink()
+    _fsync_directory(result_path.parent)
+    return archive_path
 
 
 def _write_temporary(content: bytes, directory: Path, prefix: str) -> Path:

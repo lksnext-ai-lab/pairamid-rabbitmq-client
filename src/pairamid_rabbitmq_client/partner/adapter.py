@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import signal
+from pathlib import Path
 from types import FrameType
 from typing import Any
 
@@ -17,6 +20,7 @@ from .storage import (
     InputConflictError,
     InputStateStore,
     archive_rejected_message,
+    archive_rejected_result,
     materialize_input,
 )
 
@@ -177,6 +181,99 @@ class PartnerAdapter:
             archive_path.name,
             reason,
         )
+
+    def publish_result_file(self, file_path: str | Path) -> bool:
+        """Publish one explicitly selected result file for its saved execution context."""
+        result_path = Path(file_path).expanduser()
+        assignments = parse_queue_assignments(
+            self.client.get_token_claims(),
+            self.settings.expected_partner_id,
+        )
+        self.settings.prepare_directories(
+            simulation_key for _, simulation_key in assignments.values()
+        )
+
+        matches: list[tuple[str, str, int]] = []
+        for partner_id, simulation_key in assignments.values():
+            match = re.fullmatch(
+                rf"results-{re.escape(partner_id)}-{re.escape(simulation_key)}-"
+                r"([1-9][0-9]*)\.json",
+                result_path.name,
+            )
+            if match is not None:
+                matches.append((partner_id, simulation_key, int(match.group(1))))
+        if len(matches) != 1:
+            raise ValueError(
+                "Result filename must be "
+                "results-{partner_id}-{assigned_simulation_key}-{simulation_execution_id}.json"
+            )
+        partner_id, simulation_key, execution_id = matches[0]
+
+        expected_directory = self.settings.results_dir_for(simulation_key).resolve()
+        if result_path.is_symlink() or result_path.parent.resolve() != expected_directory:
+            raise ValueError(
+                f"Result file must be placed directly in {expected_directory}"
+            )
+        if not result_path.is_file():
+            raise FileNotFoundError(f"Result file does not exist: {result_path}")
+        result_sha256 = hashlib.sha256(result_path.read_bytes()).hexdigest()
+
+        state_store = InputStateStore(
+            self.settings.state_dir_for(simulation_key),
+            partner_id,
+        )
+        state = state_store.load_for_result(simulation_key, execution_id)
+        if state.get("result_published") is True:
+            if state.get("result_sha256") != result_sha256:
+                raise InputConflictError(
+                    f"Published result file changed: {result_path.name}"
+                )
+            logger.info(
+                "event=result_already_published partner_id=%s simulation_key=%s "
+                "simulation_execution_id=%s",
+                partner_id,
+                simulation_key,
+                execution_id,
+            )
+            return False
+
+        execution_message = state["execution_message"]
+        try:
+            event = self.client.build_result_event(result_path, execution_message)
+        except (ValueError, ContractValidationError) as exc:
+            archive_path = archive_rejected_result(
+                result_path,
+                self.settings.rejected_results_dir_for(simulation_key),
+                str(exc),
+            )
+            logger.warning(
+                "event=result_rejected partner_id=%s simulation_key=%s "
+                "simulation_execution_id=%s archive=%s reason=%s",
+                partner_id,
+                simulation_key,
+                execution_id,
+                archive_path.name,
+                exc,
+            )
+            raise
+        event = state_store.save_result_event(state, result_sha256, event)
+        self.client.publish_result(
+            result_path,
+            execution_message,
+            partner_id=partner_id,
+            event=event,
+        )
+        state_store.mark_result_published(state)
+        logger.info(
+            "event=result_published partner_id=%s simulation_key=%s "
+            "simulation_execution_id=%s event_type=%s event_id=%s",
+            partner_id,
+            simulation_key,
+            execution_id,
+            event["event_type"],
+            event["event_id"],
+        )
+        return True
 
     def run(self) -> None:
         self.settings.prepare_directories()

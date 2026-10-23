@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Add explicit manual result publication by assigned simulation, filename and
+  durable input context. Build validated success/failure events, persist the
+  stable event ID before publishing, and record broker confirmation for safe
+  retries.
+- Add `scripts/publish_partner_result.py`; invalid result JSON/error payloads
+  are archived under the simulation's `rejected/results/` directory.
+- Change `PartnerClient.publish_result()` from raw legacy queue publication to
+  publishing a contract-validated event using the execution context.
+
 ## 0.0.5
 
 - **Breaking:** adopt messaging contracts 2.0 for independent simulations.

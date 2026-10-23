@@ -12,7 +12,7 @@ SETTINGS = dict(client_id="test", client_secret="not-a-secret", token_url="https
 
 
 class CompatibilityTests(unittest.TestCase):
-    def test_legacy_input_and_result_publication(self):
+    def test_legacy_input_and_contract_result_publication(self):
         with patch.object(PlatformClient, "publish") as publish:
             client = PlatformClient(**SETTINGS)
             with self.assertWarns(DeprecationWarning):
@@ -23,17 +23,25 @@ class CompatibilityTests(unittest.TestCase):
                 headers={"simulation_name": "LRi_1"},
             )
         with tempfile.TemporaryDirectory() as directory:
-            file = Path(directory) / "result.json"
+            file = Path(directory) / "results-irtjv-lri-1.json"
             file.write_text('{"value":42}')
+            message = json.loads(
+                (Path(__file__).parent / "examples" / "simulation-execution-message.json")
+                .read_text(encoding="utf-8")
+            )
             with (
                 patch.object(PartnerClient, "connect"),
                 patch.object(PartnerClient, "close"),
-                patch.object(PartnerClient, "publish") as publish,
+                patch.object(PartnerClient, "publish_event") as publish,
             ):
-                client = PartnerClient("irtjv", **SETTINGS, results_queue="legacy-custom")
-                with self.assertWarns(DeprecationWarning):
-                    client.publish_result(file)
-                publish.assert_called_once_with(queue="legacy-custom", message=b'{"value":42}')
+                client = PartnerClient("irtjv", **SETTINGS)
+                event = client.publish_result(file, message)
+                publish.assert_called_once_with(
+                    "simulation_execution.succeeded",
+                    event,
+                    event["event_id"],
+                    partner_id="irtjv",
+                )
 
     def test_legacy_polling_stores_original_bytes_before_ack_and_keeps_unique_suffix(self):
         with tempfile.TemporaryDirectory() as directory:

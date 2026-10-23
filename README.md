@@ -100,8 +100,8 @@ Valid executions write only their `input` value to
 `<simulation_key>/input/input-{partner_id}-{simulation_key}-{simulation_execution_id}.json`.
 Temporary files stay under `<simulation_key>/input/.tmp/`; durable execution
 context and event publication state are stored under `<simulation_key>/state/`.
-The adapter publishes the confirmed
-`simulation_execution.input_downloaded` event before acknowledging the execution.
+The adapter publishes the confirmed `simulation_execution.input_downloaded`
+event before acknowledging the execution.
 Identical redeliveries reuse the input and event state; conflicting input for
 the same execution ID is archived under
 `<simulation_key>/rejected/input/` and rejected.
@@ -113,6 +113,48 @@ development IRTJV/lri queue succeeded with client 0.0.6: the consumed message
 was a redelivery, its input was materialized, `input_downloaded` was confirmed,
 and the execution was acknowledged. Live polling with multiple provisioned
 queues and another partner still needs verification before broader rollout.
+
+### Manual result publication
+
+After the partner finishes a simulation, put its JSON output in the assigned
+simulation's `results/` directory and use the matching result filename. The
+output JSON shape is simulation-specific and is preserved intact in the success
+event. A definitive error file must follow the bundled
+`simulation-execution-error-payload` contract and match the saved execution IDs.
+
+For example, if the downloaded input was
+`simulations/lri/input/input-irtjv-lri-6.json`, save an output such as
+`{"status":"completed","value":42}` as
+`simulations/lri/results/results-irtjv-lri-6.json`, then run:
+
+```bash
+python scripts/publish_partner_result.py \
+  simulations/lri/results/results-irtjv-lri-6.json
+```
+
+The command checks that the filename belongs to a simulation assigned in the
+Keycloak token, that the matching input context exists and its download event
+was confirmed, and that the result file is valid JSON. It publishes a validated
+`simulation_execution.succeeded` or `simulation_execution.failed` event to
+`simulation_events_exchange` and reports success only after RabbitMQ confirms
+the publication. The event and result hash are persisted before publishing;
+rerunning after an ambiguous connection failure reuses the same event ID, and
+rerunning an already confirmed result is a no-op. Keep the result file and
+durable state until the API has consumed the event.
+
+This is an explicit one-file operation, not a watcher: placing a file in
+`results/` does not publish it automatically. A result with a wrong name or
+without matching durable input context is rejected without being associated
+with another execution. Invalid JSON or a malformed/mismatched error payload
+is archived under `<simulation_key>/rejected/results/` with its reason before
+the command fails; the original file is removed from `results/`.
+
+Real-broker smoke check on 2026-10-23: the synthetic output for execution 6
+was published to `simulation_events_exchange` with routing key `irtjv.result`
+and RabbitMQ confirmed it. The state file records event
+`755562f4-d3d0-4b5a-a31c-a06e7f722b81` as published; rerunning the command
+returned a no-op. This synthetic event is not a physical LRI result, and API
+consumption/state transition is not yet covered.
 
 ### One-shot RabbitMQ smoke test
 
@@ -294,12 +336,13 @@ drain or isolate old work before rollout.
 
 ### Migration from 0.0.3
 
-`publish(queue=..., message=..., headers=...)`, old positional queue publication,
-`PlatformClient.publish_input()` and `PartnerClient.publish_result()` remain
-available with `DeprecationWarning`. They still use the old default-exchange/
-queue topology; **iTool has removed those scopes**, so retaining the Python API
-does not restore access in its current environment. Set `results_queue=` to
-override the legacy result queue if needed.
+`publish(queue=..., message=..., headers=...)`, old positional queue publication
+and `PlatformClient.publish_input()` remain available with `DeprecationWarning`.
+They still use the old default-exchange/queue topology; **iTool has removed
+those scopes**, so retaining the Python API does not restore access in its
+current environment. `PartnerClient.publish_result()` now requires the saved
+execution context and publishes a validated result event; the former raw
+`pairamid.results` publication is no longer supported by this method.
 
 The legacy consumer and `input_queue` default are unchanged. It still uses
 polling, unique file suffixes and the `simulation_name` header, and does not emit
